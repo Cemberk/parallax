@@ -26,3 +26,21 @@ add_test(NAME manual_trace_test COMMAND manual_trace_test)
 set_tests_properties(manual_trace_test PROPERTIES
     ENVIRONMENT "GDDBG_TRACE=${CMAKE_CURRENT_BINARY_DIR}/manual_trace.gddbg"
 )
+
+# Divergence test (generates two traces for differ testing)
+add_executable(divergence_test
+    kernels/divergence_test.cu
+)
+
+target_link_libraries(divergence_test PRIVATE gddbg_runtime)
+
+target_include_directories(divergence_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/runtime
+    ${CMAKE_SOURCE_DIR}/lib/common
+)
+
+set_target_properties(divergence_test PROPERTIES
+    CUDA_ARCHITECTURES "80"
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)

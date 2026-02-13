@@ -1,0 +1,12 @@
+[package]
+name = "gddbg-diff"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+memmap2 = "0.9"
+bytemuck = { version = "1.14", features = ["derive"] }
+colored = "2.0"
+rayon = "1.8"
+anyhow = "1.0"
