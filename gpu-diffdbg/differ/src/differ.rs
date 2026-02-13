@@ -6,28 +6,49 @@ use rayon::prelude::*;
 use crate::parser::TraceFile;
 use crate::trace_format::TraceEvent;
 
+/// Configuration for differential analysis
+#[derive(Debug, Clone)]
+pub struct DiffConfig {
+    /// Compare value_a fields? (Can be noisy)
+    pub compare_values: bool,
+    /// Maximum number of divergences to collect (0 = unlimited)
+    pub max_divergences: usize,
+    /// Lookahead window size for drift detection
+    pub lookahead_window: usize,
+}
+
+impl Default for DiffConfig {
+    fn default() -> Self {
+        Self {
+            compare_values: false,
+            max_divergences: 0, // unlimited
+            lookahead_window: 32,
+        }
+    }
+}
+
 /// Type of divergence detected
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DivergenceKind {
-    /// Control flow diverged (different instruction executed)
-    ControlFlow,
     /// Branch direction diverged (same site, different direction)
-    BranchDirection,
+    Branch { dir_a: u8, dir_b: u8 },
     /// SIMT active mask diverged (different threads active)
-    ActiveMask,
+    ActiveMask { mask_a: u32, mask_b: u32 },
     /// Operand value diverged
-    OperandValue,
+    Value { val_a: u32, val_b: u32 },
+    /// True control flow divergence (different instruction reached)
+    Path { site_a: u32, site_b: u32 },
+    /// One trace has extra events (drift detected and recovered)
+    ExtraEvents { count: usize, in_trace_b: bool },
 }
 
 /// A detected divergence between two traces
 #[derive(Debug, Clone)]
 pub struct Divergence {
-    pub warp_index: usize,
-    pub event_index: usize,
-    pub kind: DivergenceKind,
+    pub warp_idx: u32,
+    pub event_idx: usize,
     pub site_id: u32,
-    pub event_a: TraceEvent,
-    pub event_b: TraceEvent,
+    pub kind: DivergenceKind,
 }
 
 /// Result of differential analysis
@@ -36,6 +57,8 @@ pub struct DiffResult {
     pub total_warps: usize,
     pub total_events_a: usize,
     pub total_events_b: usize,
+    pub warps_compared: usize,
+    pub warps_diverged: usize,
 }
 
 impl DiffResult {
@@ -52,10 +75,30 @@ impl DiffResult {
         }
         map
     }
+
+    /// Get divergences grouped by kind
+    pub fn divergences_by_kind(&self) -> std::collections::HashMap<String, usize> {
+        let mut map = std::collections::HashMap::new();
+        for div in &self.divergences {
+            let kind_str = match &div.kind {
+                DivergenceKind::Branch { .. } => "Branch",
+                DivergenceKind::ActiveMask { .. } => "ActiveMask",
+                DivergenceKind::Value { .. } => "Value",
+                DivergenceKind::Path { .. } => "Path",
+                DivergenceKind::ExtraEvents { .. } => "ExtraEvents",
+            };
+            *map.entry(kind_str.to_string()).or_insert(0) += 1;
+        }
+        map
+    }
 }
 
 /// Compare two trace files and detect divergences
-pub fn diff_traces(trace_a: &TraceFile, trace_b: &TraceFile) -> Result<DiffResult> {
+pub fn diff_traces(
+    trace_a: &TraceFile,
+    trace_b: &TraceFile,
+    config: &DiffConfig,
+) -> Result<DiffResult> {
     // Validate headers are compatible
     validate_traces(trace_a, trace_b)?;
 
@@ -65,23 +108,44 @@ pub fn diff_traces(trace_a: &TraceFile, trace_b: &TraceFile) -> Result<DiffResul
     println!("Comparing {} warps...", header_a.total_warp_slots);
 
     // Parallel comparison of all warps
-    let divergences: Vec<Divergence> = (0..header_a.total_warp_slots as usize)
+    let all_divergences: Vec<Vec<Divergence>> = (0..header_a.total_warp_slots as usize)
         .into_par_iter()
-        .filter_map(|warp_idx| {
+        .map(|warp_idx| {
             // Get events for this warp from both traces
-            let (_, events_a) = trace_a.get_warp_data(warp_idx).ok()?;
-            let (_, events_b) = trace_b.get_warp_data(warp_idx).ok()?;
+            let (_, events_a) = match trace_a.get_warp_data(warp_idx) {
+                Ok(data) => data,
+                Err(_) => return Vec::new(),
+            };
+            let (_, events_b) = match trace_b.get_warp_data(warp_idx) {
+                Ok(data) => data,
+                Err(_) => return Vec::new(),
+            };
 
-            // Find first divergence in this warp
-            find_first_divergence(warp_idx, events_a, events_b)
+            // Diff this warp with bounded lookahead
+            diff_single_warp(warp_idx as u32, events_a, events_b, config)
         })
         .collect();
+
+    // Flatten and potentially limit divergences
+    let mut divergences: Vec<Divergence> = all_divergences.into_iter().flatten().collect();
+
+    let warps_diverged = divergences
+        .iter()
+        .map(|d| d.warp_idx)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    if config.max_divergences > 0 && divergences.len() > config.max_divergences {
+        divergences.truncate(config.max_divergences);
+    }
 
     Ok(DiffResult {
         divergences,
         total_warps: header_a.total_warp_slots as usize,
         total_events_a: trace_a.total_events(),
         total_events_b: trace_b.total_events(),
+        warps_compared: header_a.total_warp_slots as usize,
+        warps_diverged,
     })
 }
 
@@ -131,107 +195,184 @@ fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile) -> Result<()> {
     Ok(())
 }
 
-/// Find the first divergence in a single warp's event stream
-fn find_first_divergence(
-    warp_index: usize,
+/// Compare a single warp's event stream with bounded lookahead
+///
+/// This implements the "bounded lookahead" algorithm to handle drift:
+/// - When site_ids match, compare masks/branches/values
+/// - When site_ids differ, look ahead to detect if one trace just has extra events
+/// - If no re-sync found, report true path divergence
+fn diff_single_warp(
+    warp_idx: u32,
     events_a: &[TraceEvent],
     events_b: &[TraceEvent],
-) -> Option<Divergence> {
-    // Lockstep comparison
-    let min_len = events_a.len().min(events_b.len());
+    config: &DiffConfig,
+) -> Vec<Divergence> {
+    let mut divergences = Vec::new();
+    let mut i_a = 0;
+    let mut i_b = 0;
 
-    for event_idx in 0..min_len {
-        let evt_a = events_a[event_idx];
-        let evt_b = events_b[event_idx];
+    while i_a < events_a.len() && i_b < events_b.len() {
+        let evt_a = events_a[i_a];
+        let evt_b = events_b[i_b];
 
-        // Check 1: Control flow divergence (different instruction)
-        if evt_a.site_id != evt_b.site_id {
-            return Some(Divergence {
-                warp_index,
-                event_index: event_idx,
-                kind: DivergenceKind::ControlFlow,
-                site_id: evt_a.site_id,
-                event_a: evt_a,
-                event_b: evt_b,
-            });
-        }
+        // Case 1: site_ids match - compare details
+        if evt_a.site_id == evt_b.site_id {
+            // Check branch direction divergence
+            if evt_a.event_type == 0 && evt_a.branch_dir != evt_b.branch_dir {
+                divergences.push(Divergence {
+                    warp_idx,
+                    event_idx: i_a,
+                    site_id: evt_a.site_id,
+                    kind: DivergenceKind::Branch {
+                        dir_a: evt_a.branch_dir,
+                        dir_b: evt_b.branch_dir,
+                    },
+                });
+            }
 
-        // Check 2: Branch direction divergence
-        if evt_a.event_type == 0 && evt_a.branch_dir != evt_b.branch_dir {
-            return Some(Divergence {
-                warp_index,
-                event_index: event_idx,
-                kind: DivergenceKind::BranchDirection,
-                site_id: evt_a.site_id,
-                event_a: evt_a,
-                event_b: evt_b,
-            });
-        }
+            // Check active mask divergence
+            if evt_a.active_mask != evt_b.active_mask {
+                divergences.push(Divergence {
+                    warp_idx,
+                    event_idx: i_a,
+                    site_id: evt_a.site_id,
+                    kind: DivergenceKind::ActiveMask {
+                        mask_a: evt_a.active_mask,
+                        mask_b: evt_b.active_mask,
+                    },
+                });
+            }
 
-        // Check 3: SIMT active mask divergence
-        if evt_a.active_mask != evt_b.active_mask {
-            return Some(Divergence {
-                warp_index,
-                event_index: event_idx,
-                kind: DivergenceKind::ActiveMask,
-                site_id: evt_a.site_id,
-                event_a: evt_a,
-                event_b: evt_b,
-            });
-        }
+            // Check value divergence (if enabled)
+            if config.compare_values && evt_a.value_a != evt_b.value_a {
+                divergences.push(Divergence {
+                    warp_idx,
+                    event_idx: i_a,
+                    site_id: evt_a.site_id,
+                    kind: DivergenceKind::Value {
+                        val_a: evt_a.value_a,
+                        val_b: evt_b.value_a,
+                    },
+                });
+            }
 
-        // Check 4: Operand value divergence (optional, for debugging)
-        if evt_a.value_a != evt_b.value_a {
-            return Some(Divergence {
-                warp_index,
-                event_index: event_idx,
-                kind: DivergenceKind::OperandValue,
-                site_id: evt_a.site_id,
-                event_a: evt_a,
-                event_b: evt_b,
-            });
-        }
-    }
-
-    // Check if one trace has more events than the other
-    if events_a.len() != events_b.len() {
-        // One warp executed more events - this is a length divergence
-        // Return a synthetic divergence at the point where they differ
-        let event_idx = min_len;
-        if event_idx < events_a.len() {
-            return Some(Divergence {
-                warp_index,
-                event_index: event_idx,
-                kind: DivergenceKind::ControlFlow,
-                site_id: events_a[event_idx].site_id,
-                event_a: events_a[event_idx],
-                event_b: TraceEvent {
-                    site_id: 0,
-                    event_type: 0,
-                    branch_dir: 0,
-                    _reserved: 0,
-                    active_mask: 0,
-                    value_a: 0,
-                },
-            });
+            // Advance both streams
+            i_a += 1;
+            i_b += 1;
         } else {
-            return Some(Divergence {
-                warp_index,
-                event_index: event_idx,
-                kind: DivergenceKind::ControlFlow,
-                site_id: events_b[event_idx].site_id,
-                event_a: TraceEvent {
-                    site_id: 0,
-                    event_type: 0,
-                    branch_dir: 0,
-                    _reserved: 0,
-                    active_mask: 0,
-                    value_a: 0,
-                },
-                event_b: events_b[event_idx],
-            });
+            // Case 2: site_ids differ - try bounded lookahead to detect drift
+
+            // Try to find evt_a.site_id ahead in stream B
+            let mut found_in_b = None;
+            for k in 1..=config.lookahead_window.min(events_b.len() - i_b) {
+                if i_b + k < events_b.len() && events_b[i_b + k].site_id == evt_a.site_id {
+                    found_in_b = Some(k);
+                    break;
+                }
+            }
+
+            // Try to find evt_b.site_id ahead in stream A
+            let mut found_in_a = None;
+            for k in 1..=config.lookahead_window.min(events_a.len() - i_a) {
+                if i_a + k < events_a.len() && events_a[i_a + k].site_id == evt_b.site_id {
+                    found_in_a = Some(k);
+                    break;
+                }
+            }
+
+            match (found_in_a, found_in_b) {
+                (Some(k), None) => {
+                    // Stream A has extra events
+                    divergences.push(Divergence {
+                        warp_idx,
+                        event_idx: i_a,
+                        site_id: evt_a.site_id,
+                        kind: DivergenceKind::ExtraEvents {
+                            count: k,
+                            in_trace_b: false,
+                        },
+                    });
+                    i_a += k; // Skip extra events in A
+                }
+                (None, Some(k)) => {
+                    // Stream B has extra events
+                    divergences.push(Divergence {
+                        warp_idx,
+                        event_idx: i_a,
+                        site_id: evt_b.site_id,
+                        kind: DivergenceKind::ExtraEvents {
+                            count: k,
+                            in_trace_b: true,
+                        },
+                    });
+                    i_b += k; // Skip extra events in B
+                }
+                (Some(k_a), Some(k_b)) => {
+                    // Both found - choose the shorter skip to minimize disruption
+                    if k_a <= k_b {
+                        divergences.push(Divergence {
+                            warp_idx,
+                            event_idx: i_a,
+                            site_id: evt_a.site_id,
+                            kind: DivergenceKind::ExtraEvents {
+                                count: k_a,
+                                in_trace_b: false,
+                            },
+                        });
+                        i_a += k_a;
+                    } else {
+                        divergences.push(Divergence {
+                            warp_idx,
+                            event_idx: i_a,
+                            site_id: evt_b.site_id,
+                            kind: DivergenceKind::ExtraEvents {
+                                count: k_b,
+                                in_trace_b: true,
+                            },
+                        });
+                        i_b += k_b;
+                    }
+                }
+                (None, None) => {
+                    // True path divergence - cannot re-sync
+                    divergences.push(Divergence {
+                        warp_idx,
+                        event_idx: i_a,
+                        site_id: evt_a.site_id,
+                        kind: DivergenceKind::Path {
+                            site_a: evt_a.site_id,
+                            site_b: evt_b.site_id,
+                        },
+                    });
+                    // Stop comparing this warp - paths have truly diverged
+                    break;
+                }
+            }
         }
     }
 
-    None
+    // Handle trailing events
+    if i_a < events_a.len() {
+        divergences.push(Divergence {
+            warp_idx,
+            event_idx: i_a,
+            site_id: events_a[i_a].site_id,
+            kind: DivergenceKind::ExtraEvents {
+                count: events_a.len() - i_a,
+                in_trace_b: false,
+            },
+        });
+    } else if i_b < events_b.len() {
+        divergences.push(Divergence {
+            warp_idx,
+            event_idx: i_a,
+            site_id: events_b[i_b].site_id,
+            kind: DivergenceKind::ExtraEvents {
+                count: events_b.len() - i_b,
+                in_trace_b: true,
+            },
+        });
+    }
+
+    divergences
 }

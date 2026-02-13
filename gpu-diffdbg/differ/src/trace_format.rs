@@ -9,6 +9,9 @@ pub const GDDBG_MAGIC: u64 = 0x4744444247504400;
 /// Current trace format version
 pub const GDDBG_VERSION: u32 = 1;
 
+/// Default number of events per warp
+pub const GDDBG_EVENTS_PER_WARP: usize = 4096;
+
 /// Event type constants
 pub const EVENT_BRANCH: u8 = 0;
 pub const EVENT_SHMEM_STORE: u8 = 1;

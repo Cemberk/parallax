@@ -11,7 +11,7 @@ mod parser;
 mod report;
 mod trace_format;
 
-use differ::diff_traces;
+use differ::{diff_traces, DiffConfig};
 use parser::TraceFile;
 use report::{print_divergences, print_summary, print_trace_info};
 
@@ -35,6 +35,18 @@ struct Args {
     /// Show detailed trace information
     #[arg(short = 'v', long)]
     verbose: bool,
+
+    /// Compare operand values (can be noisy)
+    #[arg(long)]
+    values: bool,
+
+    /// Maximum number of divergences to collect (0 = unlimited)
+    #[arg(short = 'l', long = "limit", default_value = "0")]
+    max_divergences: usize,
+
+    /// Lookahead window size for drift detection
+    #[arg(long, default_value = "32")]
+    lookahead: usize,
 
     /// Dump first N events from trace A (debugging)
     #[arg(long)]
@@ -72,8 +84,15 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Create diff configuration
+    let config = DiffConfig {
+        compare_values: args.values,
+        max_divergences: args.max_divergences,
+        lookahead_window: args.lookahead,
+    };
+
     // Perform differential analysis
-    let result = diff_traces(&trace_a, &trace_b)?;
+    let result = diff_traces(&trace_a, &trace_b, &config)?;
 
     // Print results
     print_summary(&result);

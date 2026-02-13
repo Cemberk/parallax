@@ -7,9 +7,12 @@ use crate::differ::{DiffResult, Divergence, DivergenceKind};
 /// Print a summary of the diff result
 pub fn print_summary(result: &DiffResult) {
     println!("\n{}", "=== Diff Summary ===".bold());
-    println!("Total warps:       {}", result.total_warps);
-    println!("Events in trace A: {}", result.total_events_a);
-    println!("Events in trace B: {}", result.total_events_b);
+    println!("Total warps:          {}", result.total_warps);
+    println!("Warps compared:       {}", result.warps_compared);
+    println!("Warps diverged:       {}", result.warps_diverged);
+    println!("Events in trace A:    {}", result.total_events_a);
+    println!("Events in trace B:    {}", result.total_events_b);
+    println!("Total divergences:    {}", result.divergences.len());
     println!();
 
     if result.is_identical() {
@@ -20,8 +23,17 @@ pub fn print_summary(result: &DiffResult) {
     println!(
         "{} {}",
         "✗ DIVERGENCE DETECTED:".red().bold(),
-        format!("{} warps diverged", result.divergences.len()).red()
+        format!("{} warps affected", result.warps_diverged).red()
     );
+
+    // Print breakdown by kind
+    let by_kind = result.divergences_by_kind();
+    if !by_kind.is_empty() {
+        println!("\nDivergence breakdown:");
+        for (kind, count) in by_kind.iter() {
+            println!("  {}: {}", kind, count);
+        }
+    }
     println!();
 }
 
@@ -70,62 +82,68 @@ pub fn print_divergences(result: &DiffResult, max_shown: usize) {
 
 /// Print a single divergence
 fn print_divergence(div: &Divergence) {
-    let kind_str = match div.kind {
-        DivergenceKind::ControlFlow => "Control Flow".red(),
-        DivergenceKind::BranchDirection => "Branch Direction".yellow(),
-        DivergenceKind::ActiveMask => "Active Mask".magenta(),
-        DivergenceKind::OperandValue => "Operand Value".blue(),
-    };
+    print!("  Warp {} @ event {}: ", div.warp_idx, div.event_idx);
 
-    println!(
-        "  Warp {} @ event {}: {} divergence",
-        div.warp_index, div.event_index, kind_str
-    );
-
-    match div.kind {
-        DivergenceKind::ControlFlow => {
+    match &div.kind {
+        DivergenceKind::Branch { dir_a, dir_b } => {
+            println!("{}", "Branch Direction".yellow());
+            let dir_a_str = if *dir_a == 0 { "NOT-TAKEN" } else { "TAKEN" };
+            let dir_b_str = if *dir_b == 0 { "NOT-TAKEN" } else { "TAKEN" };
+            println!("    Trace A: {}", dir_a_str.cyan());
+            println!("    Trace B: {}", dir_b_str.magenta());
             println!(
-                "    Trace A: site=0x{:08x} type={}",
-                div.event_a.site_id, div.event_a.event_type
-            );
-            println!(
-                "    Trace B: site=0x{:08x} type={}",
-                div.event_b.site_id, div.event_b.event_type
+                "    → Threads at site 0x{:08x} took different branch",
+                div.site_id
             );
         }
-        DivergenceKind::BranchDirection => {
+        DivergenceKind::ActiveMask { mask_a, mask_b } => {
+            println!("{}", "Active Mask Mismatch".magenta());
             println!(
-                "    Trace A: {} (value={})",
-                div.event_a.branch_direction_str(),
-                div.event_a.value_a
+                "    Trace A: 0x{:08x} ({} threads active)",
+                mask_a,
+                mask_a.count_ones()
             );
             println!(
-                "    Trace B: {} (value={})",
-                div.event_b.branch_direction_str(),
-                div.event_b.value_a
+                "    Trace B: 0x{:08x} ({} threads active)",
+                mask_b,
+                mask_b.count_ones()
             );
+            let diff = mask_a ^ mask_b;
+            if diff != 0 {
+                println!("    → Lanes differ: 0x{:08x}", diff);
+                // Show which lanes differ
+                let mut differing_lanes = Vec::new();
+                for lane in 0..32 {
+                    if (diff & (1 << lane)) != 0 {
+                        differing_lanes.push(lane);
+                    }
+                }
+                if differing_lanes.len() <= 8 {
+                    println!("    → Lanes: {:?}", differing_lanes);
+                }
+            }
         }
-        DivergenceKind::ActiveMask => {
-            println!(
-                "    Trace A: active_mask=0x{:08x} ({} threads)",
-                div.event_a.active_mask,
-                div.event_a.active_mask.count_ones()
-            );
-            println!(
-                "    Trace B: active_mask=0x{:08x} ({} threads)",
-                div.event_b.active_mask,
-                div.event_b.active_mask.count_ones()
-            );
+        DivergenceKind::Value { val_a, val_b } => {
+            println!("{}", "Value Mismatch".blue());
+            println!("    Trace A: {} (0x{:08x})", val_a, val_a);
+            println!("    Trace B: {} (0x{:08x})", val_b, val_b);
+            println!("    → Different operand values at site 0x{:08x}", div.site_id);
         }
-        DivergenceKind::OperandValue => {
-            println!(
-                "    Trace A: value={} (0x{:08x})",
-                div.event_a.value_a, div.event_a.value_a
-            );
-            println!(
-                "    Trace B: value={} (0x{:08x})",
-                div.event_b.value_a, div.event_b.value_a
-            );
+        DivergenceKind::Path { site_a, site_b } => {
+            println!("{}", "TRUE PATH DIVERGENCE".red().bold());
+            println!("    Trace A reached: 0x{:08x}", site_a);
+            println!("    Trace B reached: 0x{:08x}", site_b);
+            println!("    → {}", "Control flow has truly diverged - different code paths executed".red());
+        }
+        DivergenceKind::ExtraEvents { count, in_trace_b } => {
+            println!("{}", "Extra Events (Drift)".cyan());
+            if *in_trace_b {
+                println!("    Trace B has {} extra event(s)", count);
+                println!("    → Trace B executed more iterations or deeper recursion");
+            } else {
+                println!("    Trace A has {} extra event(s)", count);
+                println!("    → Trace A executed more iterations or deeper recursion");
+            }
         }
     }
 }

@@ -10,3 +10,14 @@ bytemuck = { version = "1.14", features = ["derive"] }
 colored = "2.0"
 rayon = "1.8"
 anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[lib]
+name = "gddbg_diff"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gddbg-diff"
+path = "src/main.rs"
