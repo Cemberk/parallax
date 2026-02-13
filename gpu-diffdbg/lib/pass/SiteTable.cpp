@@ -1,6 +1,8 @@
 #include "SiteTable.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Function.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/FileSystem.h"
 #include <sstream>
 
 namespace gddbg {
@@ -84,6 +86,53 @@ const SiteInfo* SiteTable::getSiteInfo(uint32_t site_id) const {
         return &sites_[it->second];
     }
     return nullptr;
+}
+
+bool SiteTable::exportToJSON(const std::string& filename) const {
+    std::error_code EC;
+    llvm::raw_fd_ostream OS(filename, EC, llvm::sys::fs::OF_None);
+    if (EC) {
+        llvm::errs() << "[gddbg] Error opening site table file: " << EC.message() << "\n";
+        return false;
+    }
+
+    // Write JSON array
+    OS << "[\n";
+    for (size_t i = 0; i < sites_.size(); ++i) {
+        const SiteInfo& site = sites_[i];
+
+        // Escape special characters in strings
+        auto escapeJSON = [](const std::string& s) -> std::string {
+            std::string result;
+            for (char c : s) {
+                switch (c) {
+                    case '\\': result += "\\\\"; break;
+                    case '"': result += "\\\""; break;
+                    case '\n': result += "\\n"; break;
+                    case '\r': result += "\\r"; break;
+                    case '\t': result += "\\t"; break;
+                    default: result += c; break;
+                }
+            }
+            return result;
+        };
+
+        OS << "  {\n";
+        OS << "    \"site_id\": " << site.site_id << ",\n";
+        OS << "    \"filename\": \"" << escapeJSON(site.location.filename) << "\",\n";
+        OS << "    \"function\": \"" << escapeJSON(site.location.function_name) << "\",\n";
+        OS << "    \"line\": " << site.location.line << ",\n";
+        OS << "    \"column\": " << site.location.column << ",\n";
+        OS << "    \"event_type\": " << (int)site.event_type << "\n";
+        OS << "  }";
+        if (i < sites_.size() - 1) {
+            OS << ",";
+        }
+        OS << "\n";
+    }
+    OS << "]\n";
+
+    return true;
 }
 
 } // namespace gddbg

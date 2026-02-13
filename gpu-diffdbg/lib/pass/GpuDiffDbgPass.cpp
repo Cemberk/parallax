@@ -8,6 +8,7 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "../common/trace_format.h"
 #include <string>
+#include <cstdlib>
 
 using namespace llvm;
 
@@ -132,11 +133,16 @@ void GpuDiffDbgPass::instrumentBranch(BranchInst* BI, SiteTable& siteTable, Modu
     }
 
     // Call __gddbg_record_branch(site_id, condition, operand_a)
-    Builder.CreateCall(record_branch_fn_, {
+    CallInst* CI = Builder.CreateCall(record_branch_fn_, {
         ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
         CondI32,
         OperandA
     });
+
+    // CRITICAL: Mark as convergent so LLVM doesn't move it
+    // __gddbg_record_branch uses __activemask()/__ballot() which are convergent operations
+    // Moving the call changes the active mask, breaking correctness
+    CI->addFnAttr(Attribute::Convergent);
 }
 
 void GpuDiffDbgPass::instrumentSharedMemStore(StoreInst* SI, SiteTable& siteTable, Module& M) {
@@ -171,11 +177,14 @@ void GpuDiffDbgPass::instrumentSharedMemStore(StoreInst* SI, SiteTable& siteTabl
     }
 
     // Call __gddbg_record_shmem_store(site_id, address, value)
-    Builder.CreateCall(record_shmem_store_fn_, {
+    CallInst* CI = Builder.CreateCall(record_shmem_store_fn_, {
         ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
         AddrInt,
         ValI32
     });
+
+    // CRITICAL: Mark as convergent (uses __activemask())
+    CI->addFnAttr(Attribute::Convergent);
 }
 
 void GpuDiffDbgPass::instrumentAtomic(AtomicRMWInst* AI, SiteTable& siteTable, Module& M) {
@@ -207,12 +216,15 @@ void GpuDiffDbgPass::instrumentAtomic(AtomicRMWInst* AI, SiteTable& siteTable, M
     // For now, just record the operand (result recording requires splitting the block)
 
     // Call __gddbg_record_atomic(site_id, address, operand, 0)
-    Builder.CreateCall(record_atomic_fn_, {
+    CallInst* CI = Builder.CreateCall(record_atomic_fn_, {
         ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
         AddrInt,
         ValI32,
         ConstantInt::get(Type::getInt32Ty(Ctx), 0)  // Result placeholder
     });
+
+    // CRITICAL: Mark as convergent (uses __activemask())
+    CI->addFnAttr(Attribute::Convergent);
 }
 
 void GpuDiffDbgPass::instrumentCmpXchg(AtomicCmpXchgInst* CI, SiteTable& siteTable, Module& M) {
@@ -221,9 +233,20 @@ void GpuDiffDbgPass::instrumentCmpXchg(AtomicCmpXchgInst* CI, SiteTable& siteTab
 }
 
 void GpuDiffDbgPass::embedSiteTable(Module& M, const SiteTable& siteTable) {
-    // TODO: Embed site table as a global constant array
-    // For now, site table will be empty in the binary
-    // The differ will need to read debug info directly or use a separate site table file
+    // Export site table to JSON file
+    // The differ will read this file to map site_ids to source locations
+    std::string filename = "gddbg-sites.json";
+
+    // Try to use GDDBG_SITES environment variable if set
+    if (const char* env_path = std::getenv("GDDBG_SITES")) {
+        filename = env_path;
+    }
+
+    if (siteTable.exportToJSON(filename)) {
+        errs() << "[gddbg] Exported site table to: " << filename << "\n";
+    } else {
+        errs() << "[gddbg] WARNING: Failed to export site table\n";
+    }
 }
 
 PreservedAnalyses GpuDiffDbgPass::run(Module& M, ModuleAnalysisManager& AM) {

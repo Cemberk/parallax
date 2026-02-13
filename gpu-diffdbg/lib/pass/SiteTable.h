@@ -41,6 +41,9 @@ public:
     // Get site info by ID
     const SiteInfo* getSiteInfo(uint32_t site_id) const;
 
+    // Export site table to JSON file
+    bool exportToJSON(const std::string& filename) const;
+
 private:
     // Extract source location from an instruction
     SourceLocation getSourceLocation(const llvm::Instruction* I) const;
