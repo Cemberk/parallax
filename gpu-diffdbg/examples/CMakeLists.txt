@@ -54,6 +54,24 @@ set_target_properties(matmul_divergence PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 
+# Scenario 4: Instrumented Divergence - Full pipeline with manual instrumentation
+add_executable(instrumented_divergence
+    instrumented_divergence.cu
+)
+
+target_link_libraries(instrumented_divergence PRIVATE gddbg_runtime)
+
+target_include_directories(instrumented_divergence PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/runtime
+    ${CMAKE_SOURCE_DIR}/lib/common
+)
+
+set_target_properties(instrumented_divergence PROPERTIES
+    CUDA_ARCHITECTURES "80"
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)
+
 # Optional: Add as CTests
 add_test(NAME example_loop_divergence COMMAND loop_divergence 10)
 set_tests_properties(example_loop_divergence PROPERTIES

@@ -29,12 +29,17 @@ target_include_directories(GpuDiffDbgPass PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
 
-# Link against LLVM libraries
-target_link_libraries(GpuDiffDbgPass PRIVATE
-    LLVMCore
-    LLVMSupport
-    LLVMPasses
-)
+# Link against LLVM: use shared libLLVM if available to avoid symbol conflicts
+# when loaded into opt/clang (which also use libLLVM.so)
+if(LLVM_LINK_LLVM_DYLIB)
+    # LLVM was built with shared libLLVM - link against it
+    target_link_libraries(GpuDiffDbgPass PRIVATE LLVM)
+else()
+    # Fallback: don't link LLVM libs at all for MODULE plugins.
+    # The pass plugin will resolve symbols from the host process (opt/clang).
+    # This avoids duplicate LLVM symbol registration errors.
+    # We only need the headers (already included via LLVM_INCLUDE_DIRS).
+endif()
 
 # Set output name
 set_target_properties(GpuDiffDbgPass PROPERTIES
@@ -42,10 +47,14 @@ set_target_properties(GpuDiffDbgPass PROPERTIES
     OUTPUT_NAME "libGpuDiffDbgPass"
 )
 
-# On Linux, we need -fPIC and avoid linking against unnecessary LLVM libs
+# On Linux, we need -fPIC and undefined symbols are resolved at load time
 if(UNIX AND NOT APPLE)
     target_compile_options(GpuDiffDbgPass PRIVATE -fPIC)
     target_link_options(GpuDiffDbgPass PRIVATE -Wl,-znodelete)
+    # Allow undefined symbols - they come from the host process (opt/clang)
+    set_target_properties(GpuDiffDbgPass PROPERTIES
+        LINK_FLAGS "-Wl,--allow-shlib-undefined"
+    )
 endif()
 
 # Installation

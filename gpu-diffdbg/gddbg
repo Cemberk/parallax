@@ -232,6 +232,89 @@ def cmd_check(args):
         return cmd_diff(diff_args)
 
 
+def cmd_triton(args):
+    """Triton/Python integration management."""
+    script_dir = Path(__file__).parent
+
+    if args.info or args.check_env:
+        print("=== GPU DiffDbg Triton Integration ===")
+
+        # Check for LLVM pass plugin
+        pass_plugin = script_dir / "build" / "lib" / "pass" / "libGpuDiffDbgPass.so"
+        if pass_plugin.exists():
+            print(f"  LLVM Pass Plugin: {pass_plugin}")
+        else:
+            print("  LLVM Pass Plugin: NOT FOUND (build with cmake)")
+
+        # Check for shared runtime
+        runtime_lib = script_dir / "build" / "lib" / "runtime" / "libgddbg_runtime_shared.so"
+        if runtime_lib.exists():
+            print(f"  Runtime Library:  {runtime_lib}")
+        else:
+            print("  Runtime Library:  NOT FOUND (build with cmake)")
+
+        # Check for differ
+        differ = find_differ_binary()
+        if differ:
+            print(f"  Differ Binary:    {differ}")
+        else:
+            print("  Differ Binary:    NOT FOUND (cargo build --release)")
+
+        # Check for Triton
+        try:
+            import triton
+            print(f"  Triton:           {triton.__version__}")
+        except ImportError:
+            print("  Triton:           NOT INSTALLED (pip install triton)")
+
+        # Check Python package
+        try:
+            sys.path.insert(0, str(script_dir / "python"))
+            import gddbg
+            print(f"  gddbg package:    {gddbg.__version__}")
+        except ImportError:
+            print("  gddbg package:    NOT INSTALLED (pip install -e python/)")
+
+        print()
+        print("Quick start:")
+        print("  pip install -e python/")
+        print("  python -c 'import gddbg; gddbg.integrate_with_triton()'")
+        return 0
+
+    if args.script:
+        # Run a Python script with Triton integration pre-loaded
+        script_path = Path(args.script)
+        if not script_path.exists():
+            print(f"Error: Script not found: {script_path}", file=sys.stderr)
+            return 1
+
+        env = os.environ.copy()
+
+        # Set up LLVM pass plugin
+        pass_plugin = script_dir / "build" / "lib" / "pass" / "libGpuDiffDbgPass.so"
+        if pass_plugin.exists():
+            existing = env.get("LLVM_PASS_PLUGINS", "")
+            env["LLVM_PASS_PLUGINS"] = f"{existing};{pass_plugin}" if existing else str(pass_plugin)
+        else:
+            print("Warning: LLVM pass plugin not found", file=sys.stderr)
+
+        # Add python package to path
+        python_pkg = script_dir / "python"
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{python_pkg}:{existing_pp}" if existing_pp else str(python_pkg)
+
+        env["GPU_DIFFDBG_HOME"] = str(script_dir)
+
+        cmd = [sys.executable, str(script_path)] + args.script_args
+        return subprocess.call(cmd, env=env)
+
+    # No args - show help
+    print("Usage:")
+    print("  gddbg triton --info           Show integration status")
+    print("  gddbg triton script.py        Run script with instrumentation")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="GPU DiffDbg - Differential debugger for CUDA kernels",
@@ -249,6 +332,9 @@ Examples:
 
   # Run twice and auto-diff
   gddbg check ./my_kernel
+
+  # Triton integration info
+  gddbg triton --info
         """
     )
 
@@ -284,6 +370,13 @@ Examples:
     parser_check.add_argument("--tui", action="store_true", help="Launch interactive TUI viewer")
     parser_check.add_argument("binary_args", nargs="*", help="Arguments to pass to binary")
 
+    # triton command
+    parser_triton = subparsers.add_parser("triton", help="Triton/Python integration")
+    parser_triton.add_argument("--info", action="store_true", help="Show integration status")
+    parser_triton.add_argument("--check-env", action="store_true", help="Verify environment setup")
+    parser_triton.add_argument("script", nargs="?", help="Python script to run with Triton integration")
+    parser_triton.add_argument("script_args", nargs="*", help="Arguments to pass to the script")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -296,6 +389,8 @@ Examples:
         return cmd_run(args)
     elif args.command == "check":
         return cmd_check(args)
+    elif args.command == "triton":
+        return cmd_triton(args)
     else:
         parser.print_help()
         return 1

@@ -56,6 +56,9 @@ private:
 
     // All recorded sites
     std::vector<SiteInfo> sites_;
+
+    // Monotonic counter for disambiguating sites without debug info
+    mutable uint32_t next_seq_ = 0;
 };
 
 } // namespace gddbg

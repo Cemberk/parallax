@@ -38,8 +38,27 @@ set_target_properties(gddbg_runtime PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS OFF
 )
 
+# Shared library for Python FFI (ctypes)
+add_library(gddbg_runtime_shared SHARED ${RUNTIME_SOURCES})
+
+target_include_directories(gddbg_runtime_shared PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common
+)
+
+target_link_libraries(gddbg_runtime_shared PUBLIC
+    CUDA::cudart
+)
+
+set_target_properties(gddbg_runtime_shared PROPERTIES
+    CUDA_ARCHITECTURES "80"
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    OUTPUT_NAME "gddbg_runtime_shared"
+)
+
 # Installation
-install(TARGETS gddbg_runtime
+install(TARGETS gddbg_runtime gddbg_runtime_shared
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
 )

@@ -105,18 +105,19 @@ bool GpuDiffDbgPass::isNVPTXModule(const Module& M) const {
 }
 
 bool GpuDiffDbgPass::isDeviceFunction(const Function& F) const {
-    // Check if function has kernel or device calling convention
-    CallingConv::ID CC = F.getCallingConv();
-
-    // NVPTX calling conventions:
-    // CallingConv::PTX_Kernel = 71
-    // CallingConv::PTX_Device = 72
-    if (CC == 71 || CC == 72) {
+    // In an NVPTX module, ALL non-declaration functions are device functions.
+    // Clang-compiled CUDA uses the default C calling convention in IR,
+    // and marks kernels via module-level !nvvm.annotations metadata (not
+    // function-level metadata). So we check the module's target triple
+    // instead of relying on calling conventions or function metadata.
+    const Module* M = F.getParent();
+    if (M && isNVPTXModule(*M)) {
         return true;
     }
 
-    // Also check for nvvm annotations
-    if (F.hasMetadata("nvvm.annotations")) {
+    // Fallback: check PTX calling conventions (set by some frontends)
+    CallingConv::ID CC = F.getCallingConv();
+    if (CC == 71 || CC == 72) {  // PTX_Kernel / PTX_Device
         return true;
     }
 
@@ -129,30 +130,35 @@ void GpuDiffDbgPass::declareRuntimeFunctions(Module& M) {
     Type* I32Ty = Type::getInt32Ty(Ctx);
     Type* I8Ty = Type::getInt8Ty(Ctx);
 
+    // Reuse existing function if already in the module (e.g., from runtime source
+    // compiled in the same translation unit). Creating a duplicate would cause
+    // LLVM to auto-rename it, producing unresolvable symbols like __gddbg_record_branch3.
+    auto getOrDeclare = [&](const char* name, FunctionType* FTy) -> Function* {
+        if (Function* F = M.getFunction(name)) {
+            return F;
+        }
+        return Function::Create(FTy, Function::ExternalLinkage, name, M);
+    };
+
     // void __gddbg_record_branch(uint32_t site_id, uint32_t condition, uint32_t operand_a)
     FunctionType* BranchFnTy = FunctionType::get(VoidTy, {I32Ty, I32Ty, I32Ty}, false);
-    record_branch_fn_ = Function::Create(BranchFnTy, Function::ExternalLinkage,
-                                          "__gddbg_record_branch", M);
+    record_branch_fn_ = getOrDeclare("__gddbg_record_branch", BranchFnTy);
 
     // void __gddbg_record_shmem_store(uint32_t site_id, uint32_t address, uint32_t value)
     FunctionType* ShMemFnTy = FunctionType::get(VoidTy, {I32Ty, I32Ty, I32Ty}, false);
-    record_shmem_store_fn_ = Function::Create(ShMemFnTy, Function::ExternalLinkage,
-                                                "__gddbg_record_shmem_store", M);
+    record_shmem_store_fn_ = getOrDeclare("__gddbg_record_shmem_store", ShMemFnTy);
 
     // void __gddbg_record_atomic(uint32_t site_id, uint32_t address, uint32_t operand, uint32_t result)
     FunctionType* AtomicFnTy = FunctionType::get(VoidTy, {I32Ty, I32Ty, I32Ty, I32Ty}, false);
-    record_atomic_fn_ = Function::Create(AtomicFnTy, Function::ExternalLinkage,
-                                          "__gddbg_record_atomic", M);
+    record_atomic_fn_ = getOrDeclare("__gddbg_record_atomic", AtomicFnTy);
 
     // void __gddbg_record_func(uint32_t site_id, uint8_t is_entry, uint32_t arg0)
     FunctionType* FuncFnTy = FunctionType::get(VoidTy, {I32Ty, I8Ty, I32Ty}, false);
-    record_func_fn_ = Function::Create(FuncFnTy, Function::ExternalLinkage,
-                                        "__gddbg_record_func", M);
+    record_func_fn_ = getOrDeclare("__gddbg_record_func", FuncFnTy);
 
     // void __gddbg_record_value(uint32_t site_id, uint32_t value) [time-travel]
     FunctionType* ValueFnTy = FunctionType::get(VoidTy, {I32Ty, I32Ty}, false);
-    record_value_fn_ = Function::Create(ValueFnTy, Function::ExternalLinkage,
-                                         "__gddbg_record_value", M);
+    record_value_fn_ = getOrDeclare("__gddbg_record_value", ValueFnTy);
 }
 
 void GpuDiffDbgPass::declareTraceBufferGlobal(Module& M) {
@@ -438,6 +444,22 @@ PreservedAnalyses GpuDiffDbgPass::run(Module& M, ModuleAnalysisManager& AM) {
     for (Function& F : M) {
         if (F.isDeclaration()) continue;
         if (!isDeviceFunction(F)) continue;
+
+        // Never instrument our own runtime functions or CUDA builtins used
+        // by the runtime. Instrumenting atomicAdd/__activemask/etc. would
+        // cause infinite recursion since __gddbg_record_* calls them internally.
+        StringRef Name = F.getName();
+        if (Name.starts_with("__gddbg_")) continue;
+
+        // Skip CUDA builtin wrappers (mangled names contain these substrings)
+        if (Name.contains("atomicAdd") || Name.contains("atomicSub") ||
+            Name.contains("atomicExch") || Name.contains("atomicMin") ||
+            Name.contains("atomicMax") || Name.contains("atomicCAS") ||
+            Name.contains("atomicAnd") || Name.contains("atomicOr") ||
+            Name.contains("atomicXor") || Name.contains("__activemask") ||
+            Name.contains("__ballot") || Name.contains("__shfl") ||
+            Name.contains("__syncthreads") || Name.contains("__threadfence") ||
+            Name.contains("__ldg") || Name.contains("__stcg")) continue;
 
         // Selective instrumentation: skip functions that don't match the filter
         if (!matchesFilter(F)) {

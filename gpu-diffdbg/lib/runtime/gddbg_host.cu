@@ -122,8 +122,7 @@ extern "C" void gddbg_pre_launch(const char* kernel_name, dim3 gridDim, dim3 blo
 
     // Set the global device variable g_gddbg_buffer to point to this buffer
     // This is the key technique to avoid modifying kernel signatures (Death Valley 2)
-    // Declare the device symbol so we can reference it
-    extern __device__ TraceBuffer* g_gddbg_buffer;
+    // g_gddbg_buffer is declared in gddbg_runtime.h (included at top)
     err = cudaMemcpyToSymbol(g_gddbg_buffer, &d_trace_buffer, sizeof(void*));
     if (err != cudaSuccess) {
         fprintf(stderr, "[gddbg] ERROR: cudaMemcpyToSymbol failed: %s\n",
@@ -162,9 +161,7 @@ extern "C" void gddbg_pre_launch(const char* kernel_name, dim3 gridDim, dim3 blo
             }
             free(h_ring_init);
 
-            // Set device globals
-            extern __device__ char* g_gddbg_history_buffer;
-            extern __device__ uint32_t g_gddbg_history_depth;
+            // Set device globals (declared in gddbg_runtime.h)
             cudaMemcpyToSymbol(g_gddbg_history_buffer, &d_history_buffer, sizeof(void*));
             cudaMemcpyToSymbol(g_gddbg_history_depth, &history_depth, sizeof(uint32_t));
 
@@ -287,11 +284,9 @@ extern "C" void gddbg_post_launch(void) {
         d_history_buffer = nullptr;
         history_buffer_size = 0;
 
-        // Clear history device globals
+        // Clear history device globals (declared in gddbg_runtime.h)
         void* null_ptr = nullptr;
         uint32_t zero = 0;
-        extern __device__ char* g_gddbg_history_buffer;
-        extern __device__ uint32_t g_gddbg_history_depth;
         cudaMemcpyToSymbol(g_gddbg_history_buffer, &null_ptr, sizeof(void*));
         cudaMemcpyToSymbol(g_gddbg_history_depth, &zero, sizeof(uint32_t));
     }

@@ -58,16 +58,17 @@ uint32_t SiteTable::getSiteId(const llvm::Instruction* I, uint8_t event_type) {
     oss << loc.filename << ":" << loc.function_name << ":"
         << loc.line << ":" << loc.column << ":" << (int)event_type;
 
+    // When debug info is absent (line=0, col=0), multiple instructions
+    // collapse to the same hash key. Use a monotonic counter to
+    // disambiguate, appending the instruction's ordinal position.
+    if (loc.line == 0 && loc.column == 0) {
+        oss << ":seq" << next_seq_++;
+    }
+
     std::string location_str = oss.str();
     uint32_t site_id = fnv1a_hash(location_str);
 
-    // Check if we've already recorded this site
-    auto it = site_map_.find(site_id);
-    if (it != site_map_.end()) {
-        return site_id;
-    }
-
-    // Record new site
+    // Record new site (each call produces a unique site when no debug info)
     SiteInfo info;
     info.site_id = site_id;
     info.location = loc;

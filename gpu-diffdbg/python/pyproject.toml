@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpu-diffdbg"
+version = "0.1.0"
+description = "Differential debugger for CUDA/Triton GPU kernels"
+
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Debuggers",
+    "Programming Language :: Python :: 3",
+]
+
+[project.optional-dependencies]
+triton = ["triton>=2.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
