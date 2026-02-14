@@ -263,7 +263,7 @@ fn draw_detail_pane(frame: &mut Frame, app: &mut App, area: Rect) {
                 .find(|d| d.warp_idx == warp_idx && d.site_id == sid && d.snapshot.is_some())
                 .and_then(|d| d.snapshot.as_ref());
             if let Some(snap) = snap {
-                format_snapshot_lines(&mut content, snap);
+                format_snapshot_lines(&mut content, snap, app.float_format);
             }
         }
     }
@@ -555,8 +555,22 @@ fn format_history_lines(
     }
 }
 
+/// Check if a cmp_predicate corresponds to an fcmp (float comparison)
+fn is_fcmp_predicate(pred: u32) -> bool {
+    matches!(pred, 1 | 2 | 4 | 14)
+}
+
+/// Format a snapshot value as either i32 or f32
+fn format_value(v: u32, as_float: bool) -> String {
+    if as_float {
+        format!("{:.4}", f32::from_bits(v))
+    } else {
+        format!("{}", v as i32)
+    }
+}
+
 /// Append per-lane operand snapshot lines to the detail content.
-fn format_snapshot_lines(lines: &mut Vec<Line<'static>>, snap: &SnapshotContext) {
+fn format_snapshot_lines(lines: &mut Vec<Line<'static>>, snap: &SnapshotContext, float_format: bool) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  Per-Lane Operands:",
@@ -592,11 +606,13 @@ fn format_snapshot_lines(lines: &mut Vec<Line<'static>>, snap: &SnapshotContext)
             break;
         }
 
-        let la = snap.lhs_a[lane as usize] as i32;
-        let ra = snap.rhs_a[lane as usize] as i32;
-        let lb = snap.lhs_b[lane as usize] as i32;
-        let rb = snap.rhs_b[lane as usize] as i32;
-        let differs = la != lb as i32 || ra != rb as i32;
+        let use_float = float_format || is_fcmp_predicate(snap.cmp_predicate);
+        let la = format_value(snap.lhs_a[lane as usize], use_float);
+        let ra = format_value(snap.rhs_a[lane as usize], use_float);
+        let lb = format_value(snap.lhs_b[lane as usize], use_float);
+        let rb = format_value(snap.rhs_b[lane as usize], use_float);
+        let differs = snap.lhs_a[lane as usize] != snap.lhs_b[lane as usize]
+            || snap.rhs_a[lane as usize] != snap.rhs_b[lane as usize];
 
         let color = if differs { Color::Red } else { Color::White };
         let marker = if differs { " <<<" } else { "" };

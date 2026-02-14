@@ -75,6 +75,10 @@ struct Args {
     #[arg(long)]
     history: bool,
 
+    /// Display snapshot operands as IEEE 754 floats instead of integers
+    #[arg(long)]
+    float: bool,
+
     /// Site map for trace A (for cross-compilation remapping)
     #[arg(long = "remap-a")]
     remap_a: Option<PathBuf>,
@@ -153,12 +157,12 @@ fn main() -> Result<()> {
     let result = diff_traces_with_remap(&trace_a, &trace_b, &config, remapper.as_ref())?;
 
     if args.tui {
-        tui::run_tui(trace_a, trace_b, result, site_map)?;
+        tui::run_tui(trace_a, trace_b, result, site_map, args.float)?;
         return Ok(());
     }
 
     print_summary(&result);
-    print_divergences(&result, args.max_shown, site_map.as_ref());
+    print_divergences(&result, args.max_shown, site_map.as_ref(), args.float);
 
     if args.history || trace_a.has_history() || trace_b.has_history() {
         print_history_context(&result, &trace_a, &trace_b, args.max_shown, site_map.as_ref());
@@ -202,7 +206,7 @@ fn run_session_diff(args: &Args) -> Result<()> {
                 print_summary(diff_result);
                 if !diff_result.is_identical() {
                     any_diverged = true;
-                    print_divergences(diff_result, args.max_shown, None);
+                    print_divergences(diff_result, args.max_shown, None, args.float);
                 }
             }
             Err(e) => {

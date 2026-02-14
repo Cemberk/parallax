@@ -40,7 +40,7 @@ pub fn print_summary(result: &DiffResult) {
 }
 
 /// Print detailed divergence information
-pub fn print_divergences(result: &DiffResult, max_shown: usize, site_map: Option<&SiteMap>) {
+pub fn print_divergences(result: &DiffResult, max_shown: usize, site_map: Option<&SiteMap>, float_format: bool) {
     if result.is_identical() {
         return;
     }
@@ -87,7 +87,7 @@ pub fn print_divergences(result: &DiffResult, max_shown: usize, site_map: Option
 
         for div in divs.iter().take(3) {
             // Show first 3 warps for this site
-            print_divergence(div, site_map);
+            print_divergence(div, site_map, float_format);
             shown += 1;
             if shown >= max_shown {
                 break;
@@ -101,7 +101,7 @@ pub fn print_divergences(result: &DiffResult, max_shown: usize, site_map: Option
 }
 
 /// Print a single divergence (with optional snapshot context)
-fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>) {
+fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>, float_format: bool) {
     print!("  Warp {} @ event {}: ", div.warp_idx, div.event_idx);
 
     match &div.kind {
@@ -182,12 +182,17 @@ fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>) {
     }
 
     if let Some(ref snap) = div.snapshot {
-        print_snapshot_context(snap);
+        print_snapshot_context(snap, float_format);
     }
 }
 
+/// Check if a cmp_predicate corresponds to an fcmp (float comparison)
+fn is_fcmp_predicate(pred: u32) -> bool {
+    matches!(pred, 1 | 2 | 4 | 14)
+}
+
 /// Print per-lane operand snapshot table
-fn print_snapshot_context(snap: &SnapshotContext) {
+fn print_snapshot_context(snap: &SnapshotContext, float_format: bool) {
     let pred_str = icmp_predicate_str(snap.cmp_predicate);
     println!(
         "    {}",
@@ -214,13 +219,14 @@ fn print_snapshot_context(snap: &SnapshotContext) {
             || snap.rhs_a[lane as usize] != snap.rhs_b[lane as usize];
 
         let marker = if differs { " <<<" } else { "" };
+        let use_float = float_format || is_fcmp_predicate(snap.cmp_predicate);
         let line = format!(
             "    {:>4}  {:>10}  {:>10}  {:>10}  {:>10}{}",
             lane,
-            format_i32(snap.lhs_a[lane as usize]),
-            format_i32(snap.rhs_a[lane as usize]),
-            format_i32(snap.lhs_b[lane as usize]),
-            format_i32(snap.rhs_b[lane as usize]),
+            format_value(snap.lhs_a[lane as usize], use_float),
+            format_value(snap.rhs_a[lane as usize], use_float),
+            format_value(snap.lhs_b[lane as usize], use_float),
+            format_value(snap.rhs_b[lane as usize], use_float),
             marker,
         );
 
@@ -235,6 +241,20 @@ fn print_snapshot_context(snap: &SnapshotContext) {
 /// Format u32 as signed i32 for readable display
 fn format_i32(v: u32) -> String {
     format!("{}", v as i32)
+}
+
+/// Format u32 bit pattern as IEEE 754 f32
+fn format_f32(v: u32) -> String {
+    format!("{:.4}", f32::from_bits(v))
+}
+
+/// Format a snapshot value as either i32 or f32
+fn format_value(v: u32, as_float: bool) -> String {
+    if as_float {
+        format_f32(v)
+    } else {
+        format_i32(v)
+    }
 }
 
 /// Get human-readable ICmp predicate string

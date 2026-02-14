@@ -33,6 +33,7 @@ pub fn run_tui(
     trace_b: TraceFile,
     diff_result: DiffResult,
     site_map: Option<SiteMap>,
+    float_format: bool,
 ) -> Result<()> {
     enable_raw_mode().context("Failed to enable raw mode. Is this a TTY?")?;
     let mut stdout = io::stdout();
@@ -40,7 +41,7 @@ pub fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(trace_a, trace_b, diff_result, site_map);
+    let mut app = App::new(trace_a, trace_b, diff_result, site_map, float_format);
 
     let result = run_event_loop(&mut terminal, &mut app);
 

@@ -216,6 +216,8 @@ def cmd_diff(args):
         cmd.extend(["-n", str(args.max_shown)])
     if hasattr(args, "tui") and args.tui:
         cmd.append("--tui")
+    if hasattr(args, "float") and getattr(args, "float", False):
+        cmd.append("--float")
     if hasattr(args, "force") and args.force:
         cmd.append("--force")
 
@@ -301,6 +303,7 @@ def cmd_check(args):
                 self.lookahead = args.lookahead
                 self.max_shown = args.max_shown
                 self.tui = getattr(args, "tui", False)
+                self.float = getattr(args, "float", False)
                 self.force = getattr(args, "force", False)
 
         return cmd_diff(DiffArgs())
@@ -526,6 +529,8 @@ Examples:
                         help="Lookahead window size")
     p_diff.add_argument("--tui", action="store_true",
                         help="Launch interactive TUI viewer")
+    p_diff.add_argument("--float", action="store_true",
+                        help="Display snapshot operands as floats")
     p_diff.add_argument("--force", action="store_true",
                         help="Skip kernel name check (compare different variants)")
 
@@ -554,6 +559,8 @@ Examples:
                          help="Lookahead window size")
     p_check.add_argument("--tui", action="store_true",
                          help="Launch interactive TUI viewer")
+    p_check.add_argument("--float", action="store_true",
+                         help="Display snapshot operands as floats")
     p_check.add_argument("binary_args", nargs="*",
                          help="Arguments to pass to binary")
 

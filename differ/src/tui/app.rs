@@ -46,6 +46,7 @@ pub struct App {
     pub divergent_warp_indices: Vec<usize>,
     pub total_divergences: usize,
 
+    pub float_format: bool,
     pub quit: bool,
     pub terminal_height: u16,
 }
@@ -56,6 +57,7 @@ impl App {
         trace_b: TraceFile,
         diff_result: DiffResult,
         site_map: Option<SiteMap>,
+        float_format: bool,
     ) -> Self {
         let num_warps = diff_result.total_warps;
         let total_divergences = diff_result.divergences.len();
@@ -97,6 +99,7 @@ impl App {
             warp_summaries,
             divergent_warp_indices,
             total_divergences,
+            float_format,
             quit: false,
             terminal_height: 24,
         }
