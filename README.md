@@ -1,4 +1,5 @@
 # PRLX
+<img width="1000" height="500" alt="prlx" src="https://github.com/user-attachments/assets/b3f2581b-28c1-4846-b3b6-1d63811d582b" />
 
 Differential debugger for CUDA and Triton GPU kernels.
 
