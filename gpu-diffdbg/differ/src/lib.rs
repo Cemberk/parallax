@@ -5,4 +5,5 @@
 pub mod differ;
 pub mod parser;
 pub mod report;
+pub mod site_map;
 pub mod trace_format;

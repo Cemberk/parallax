@@ -9,11 +9,13 @@ use std::path::PathBuf;
 mod differ;
 mod parser;
 mod report;
+mod site_map;
 mod trace_format;
 
 use differ::{diff_traces, DiffConfig};
 use parser::TraceFile;
 use report::{print_divergences, print_summary, print_trace_info};
+use site_map::SiteMap;
 
 #[derive(Parser, Debug)]
 #[command(name = "gddbg-diff")]
@@ -48,6 +50,10 @@ struct Args {
     #[arg(long, default_value = "32")]
     lookahead: usize,
 
+    /// Site mapping file (gddbg-sites.json) for source location information
+    #[arg(long = "map")]
+    site_map: Option<PathBuf>,
+
     /// Dump first N events from trace A (debugging)
     #[arg(long)]
     dump_a: Option<usize>,
@@ -67,6 +73,20 @@ fn main() -> Result<()> {
 
     let trace_b = TraceFile::open(&args.trace_b)
         .with_context(|| format!("Failed to load trace B: {}", args.trace_b.display()))?;
+
+    // Load site map if provided
+    let site_map = if let Some(map_path) = &args.site_map {
+        Some(
+            SiteMap::load(map_path)
+                .with_context(|| format!("Failed to load site map: {}", map_path.display()))?,
+        )
+    } else {
+        None
+    };
+
+    if let Some(ref map) = site_map {
+        println!("Loaded {} site mappings\n", map.len());
+    }
 
     // Print trace information
     if args.verbose {
@@ -96,7 +116,7 @@ fn main() -> Result<()> {
 
     // Print results
     print_summary(&result);
-    print_divergences(&result, args.max_shown);
+    print_divergences(&result, args.max_shown, site_map.as_ref());
 
     // Exit with non-zero if divergences found
     if !result.is_identical() {

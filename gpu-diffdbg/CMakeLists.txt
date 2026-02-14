@@ -65,3 +65,6 @@ add_subdirectory(tests)
 
 # Build tools
 add_subdirectory(tools)
+
+# Build examples (validation scenarios)
+add_subdirectory(examples)

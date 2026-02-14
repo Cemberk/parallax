@@ -3,6 +3,7 @@
 use colored::*;
 
 use crate::differ::{DiffResult, Divergence, DivergenceKind};
+use crate::site_map::SiteMap;
 
 /// Print a summary of the diff result
 pub fn print_summary(result: &DiffResult) {
@@ -38,7 +39,7 @@ pub fn print_summary(result: &DiffResult) {
 }
 
 /// Print detailed divergence information
-pub fn print_divergences(result: &DiffResult, max_shown: usize) {
+pub fn print_divergences(result: &DiffResult, max_shown: usize, site_map: Option<&SiteMap>) {
     if result.is_identical() {
         return;
     }
@@ -58,16 +59,36 @@ pub fn print_divergences(result: &DiffResult, max_shown: usize) {
         }
 
         let divs = &by_site[site_id];
-        println!(
-            "\n{} {} ({})",
-            "Site:".bold(),
-            format!("0x{:08x}", site_id).cyan(),
-            format!("{} warps affected", divs.len()).yellow()
-        );
+
+        // Format site header with source location if available
+        let site_str = if let Some(map) = site_map {
+            if let Some(loc) = map.get(*site_id) {
+                format!(
+                    "{} at {} ({})",
+                    format!("0x{:08x}", site_id).cyan(),
+                    loc.format_short().green().bold(),
+                    format!("{} warps affected", divs.len()).yellow()
+                )
+            } else {
+                format!(
+                    "{} ({})",
+                    format!("0x{:08x}", site_id).cyan(),
+                    format!("{} warps affected", divs.len()).yellow()
+                )
+            }
+        } else {
+            format!(
+                "{} ({})",
+                format!("0x{:08x}", site_id).cyan(),
+                format!("{} warps affected", divs.len()).yellow()
+            )
+        };
+
+        println!("\n{} {}", "Site:".bold(), site_str);
 
         for div in divs.iter().take(3) {
             // Show first 3 warps for this site
-            print_divergence(div);
+            print_divergence(div, site_map);
             shown += 1;
             if shown >= max_shown {
                 break;
@@ -81,7 +102,7 @@ pub fn print_divergences(result: &DiffResult, max_shown: usize) {
 }
 
 /// Print a single divergence
-fn print_divergence(div: &Divergence) {
+fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>) {
     print!("  Warp {} @ event {}: ", div.warp_idx, div.event_idx);
 
     match &div.kind {
@@ -131,8 +152,24 @@ fn print_divergence(div: &Divergence) {
         }
         DivergenceKind::Path { site_a, site_b } => {
             println!("{}", "TRUE PATH DIVERGENCE".red().bold());
-            println!("    Trace A reached: 0x{:08x}", site_a);
-            println!("    Trace B reached: 0x{:08x}", site_b);
+
+            // Show site_a with source location if available
+            if let Some(map) = site_map {
+                if let Some(loc) = map.get(*site_a) {
+                    println!("    Trace A reached: 0x{:08x} ({})", site_a, loc.format_short().green());
+                } else {
+                    println!("    Trace A reached: 0x{:08x}", site_a);
+                }
+                if let Some(loc) = map.get(*site_b) {
+                    println!("    Trace B reached: 0x{:08x} ({})", site_b, loc.format_short().green());
+                } else {
+                    println!("    Trace B reached: 0x{:08x}", site_b);
+                }
+            } else {
+                println!("    Trace A reached: 0x{:08x}", site_a);
+                println!("    Trace B reached: 0x{:08x}", site_b);
+            }
+
             println!("    → {}", "Control flow has truly diverged - different code paths executed".red());
         }
         DivergenceKind::ExtraEvents { count, in_trace_b } => {
