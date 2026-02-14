@@ -24,6 +24,22 @@ typedef struct {
 // Global device pointer to trace buffer (set by host via cudaMemcpyToSymbol)
 extern __device__ TraceBuffer* g_gddbg_buffer;
 
+// ---- Region of Interest (ROI) Toggle ----
+// Users can enable/disable recording from within their kernel code.
+// This allows targeting specific code paths or time slices.
+//
+// Usage:
+//   if (threadIdx.x == 0 && error_metric > threshold) {
+//       gddbg_enable();
+//   }
+//   ... buggy code ...
+//   gddbg_disable();
+//
+extern __device__ volatile int __gddbg_recording_enabled;
+
+__device__ __forceinline__ void gddbg_enable()  { __gddbg_recording_enabled = 1; }
+__device__ __forceinline__ void gddbg_disable() { __gddbg_recording_enabled = 0; }
+
 // Device-side recording functions (called by instrumented code)
 extern "C" {
     __device__ void __gddbg_record_branch(

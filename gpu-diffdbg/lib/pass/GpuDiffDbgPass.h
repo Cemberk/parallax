@@ -6,6 +6,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include <string>
+#include <vector>
 
 namespace gddbg {
 
@@ -19,6 +21,16 @@ private:
 
     // Check if a function is a device function
     bool isDeviceFunction(const llvm::Function& F) const;
+
+    // Check if a function matches the user's filter pattern
+    // Returns true if the function should be instrumented
+    bool matchesFilter(const llvm::Function& F) const;
+
+    // Simple glob matching: supports '*' wildcard
+    static bool globMatch(const std::string& pattern, const std::string& text);
+
+    // Load filter patterns from environment or command-line option
+    void loadFilters();
 
     // Declare runtime recording functions in the module
     void declareRuntimeFunctions(llvm::Module& M);
@@ -46,6 +58,11 @@ private:
     llvm::Function* record_shmem_store_fn_ = nullptr;
     llvm::Function* record_atomic_fn_ = nullptr;
     llvm::Function* record_func_fn_ = nullptr;
+
+    // Selective instrumentation: function name filters
+    // Empty = instrument everything (default)
+    std::vector<std::string> filter_patterns_;
+    bool filters_loaded_ = false;
 };
 
 } // namespace gddbg

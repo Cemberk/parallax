@@ -9,10 +9,94 @@
 #include "../common/trace_format.h"
 #include <string>
 #include <cstdlib>
+#include <sstream>
 
 using namespace llvm;
 
 namespace gddbg {
+
+// ---- Selective Instrumentation: Compile-Time Filter ----
+
+void GpuDiffDbgPass::loadFilters() {
+    if (filters_loaded_) return;
+    filters_loaded_ = true;
+
+    // Read filter from GDDBG_FILTER environment variable
+    // Supports comma-separated patterns: "compute_attention,matmul_*"
+    const char* env_filter = std::getenv("GDDBG_FILTER");
+    if (!env_filter) return;
+
+    std::string filters(env_filter);
+    if (filters.empty()) return;
+
+    std::istringstream ss(filters);
+    std::string pattern;
+    while (std::getline(ss, pattern, ',')) {
+        // Trim whitespace
+        size_t start = pattern.find_first_not_of(" \t");
+        size_t end = pattern.find_last_not_of(" \t");
+        if (start != std::string::npos) {
+            filter_patterns_.push_back(pattern.substr(start, end - start + 1));
+        }
+    }
+
+    if (!filter_patterns_.empty()) {
+        errs() << "[gddbg] Selective instrumentation enabled. Filters:\n";
+        for (const auto& p : filter_patterns_) {
+            errs() << "[gddbg]   - " << p << "\n";
+        }
+    }
+}
+
+bool GpuDiffDbgPass::globMatch(const std::string& pattern, const std::string& text) {
+    // Simple glob matching with '*' wildcard
+    size_t pi = 0, ti = 0;
+    size_t star_p = std::string::npos, star_t = 0;
+
+    while (ti < text.size()) {
+        if (pi < pattern.size() && (pattern[pi] == text[ti] || pattern[pi] == '?')) {
+            pi++;
+            ti++;
+        } else if (pi < pattern.size() && pattern[pi] == '*') {
+            star_p = pi++;
+            star_t = ti;
+        } else if (star_p != std::string::npos) {
+            pi = star_p + 1;
+            ti = ++star_t;
+        } else {
+            return false;
+        }
+    }
+
+    while (pi < pattern.size() && pattern[pi] == '*') {
+        pi++;
+    }
+
+    return pi == pattern.size();
+}
+
+bool GpuDiffDbgPass::matchesFilter(const Function& F) const {
+    // No filters = instrument everything
+    if (filter_patterns_.empty()) return true;
+
+    std::string fname = F.getName().str();
+
+    // Check each pattern
+    for (const auto& pattern : filter_patterns_) {
+        if (globMatch(pattern, fname)) return true;
+
+        // Also try matching against demangled-style names
+        // CUDA mangles kernel names, so "my_kernel" might appear as
+        // "_Z9my_kernelPiS_ii" - check if pattern appears as substring
+        if (pattern.find('*') == std::string::npos &&
+            pattern.find('?') == std::string::npos) {
+            // Plain name (no wildcards): check if it's a substring
+            if (fname.find(pattern) != std::string::npos) return true;
+        }
+    }
+
+    return false;
+}
 
 bool GpuDiffDbgPass::isNVPTXModule(const Module& M) const {
     std::string triple = M.getTargetTriple();
@@ -257,19 +341,30 @@ PreservedAnalyses GpuDiffDbgPass::run(Module& M, ModuleAnalysisManager& AM) {
 
     errs() << "[gddbg] Instrumenting NVPTX module: " << M.getName() << "\n";
 
-    // 2. Declare runtime functions
+    // 2. Load selective instrumentation filters
+    loadFilters();
+
+    // 3. Declare runtime functions
     declareRuntimeFunctions(M);
 
-    // 3. Declare trace buffer global variable
+    // 4. Declare trace buffer global variable
     declareTraceBufferGlobal(M);
 
-    // 4. Build site table
+    // 5. Build site table
     SiteTable siteTable;
 
-    // 5. Iterate over all functions
+    unsigned skipped = 0;
+
+    // 6. Iterate over all functions
     for (Function& F : M) {
         if (F.isDeclaration()) continue;
         if (!isDeviceFunction(F)) continue;
+
+        // Selective instrumentation: skip functions that don't match the filter
+        if (!matchesFilter(F)) {
+            skipped++;
+            continue;
+        }
 
         errs() << "[gddbg]   Instrumenting function: " << F.getName() << "\n";
 
@@ -319,6 +414,9 @@ PreservedAnalyses GpuDiffDbgPass::run(Module& M, ModuleAnalysisManager& AM) {
     }
 
     errs() << "[gddbg] Instrumented " << siteTable.getSites().size() << " sites\n";
+    if (skipped > 0) {
+        errs() << "[gddbg] Skipped " << skipped << " functions (filtered out)\n";
+    }
 
     // 6. Embed site table
     embedSiteTable(M, siteTable);

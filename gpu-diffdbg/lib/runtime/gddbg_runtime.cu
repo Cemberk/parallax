@@ -5,6 +5,11 @@
 // This is the key to avoiding kernel signature modification (Death Valley 2)
 __device__ TraceBuffer* g_gddbg_buffer = nullptr;
 
+// Region of Interest (ROI) toggle
+// 1 = recording enabled (default), 0 = recording disabled
+// Users call gddbg_enable() / gddbg_disable() from kernel code
+__device__ volatile int __gddbg_recording_enabled = 1;
+
 // Compute linear warp ID within the grid
 __device__ __forceinline__ uint32_t __gddbg_warp_id() {
     // Thread ID within block
@@ -63,6 +68,9 @@ extern "C" __device__ void __gddbg_record_branch(
     // Only lane 0 of each warp records the event to avoid redundant writes
     if (__gddbg_lane_id() != 0) return;
 
+    // Check ROI toggle - skip if user has disabled recording
+    if (!__gddbg_recording_enabled) return;
+
     // Check if tracing is enabled (buffer pointer is non-null)
     TraceBuffer* buf = g_gddbg_buffer;
     if (buf == nullptr) return;
@@ -109,6 +117,7 @@ extern "C" __device__ void __gddbg_record_shmem_store(
     uint32_t value
 ) {
     if (__gddbg_lane_id() != 0) return;
+    if (!__gddbg_recording_enabled) return;
 
     TraceBuffer* buf = g_gddbg_buffer;
     if (buf == nullptr) return;
@@ -146,6 +155,7 @@ extern "C" __device__ void __gddbg_record_atomic(
     uint32_t result
 ) {
     if (__gddbg_lane_id() != 0) return;
+    if (!__gddbg_recording_enabled) return;
 
     TraceBuffer* buf = g_gddbg_buffer;
     if (buf == nullptr) return;
@@ -182,6 +192,7 @@ extern "C" __device__ void __gddbg_record_func(
     uint32_t arg0
 ) {
     if (__gddbg_lane_id() != 0) return;
+    if (!__gddbg_recording_enabled) return;
 
     TraceBuffer* buf = g_gddbg_buffer;
     if (buf == nullptr) return;
