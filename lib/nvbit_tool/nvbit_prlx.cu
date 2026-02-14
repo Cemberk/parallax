@@ -1,19 +1,14 @@
 // NVBit binary instrumentation tool for prlx.
 //
-// This is the main NVBit tool. It registers callbacks for CUDA events,
-// instruments SASS instructions, and produces .prlx trace files compatible
-// with the existing Rust differ.
-//
 // Usage:
-//   LD_PRELOAD=./build/lib/nvbit_tool/libprlx_nvbit.so \
-//     PRLX_TRACE=trace.prlx ./my_cuda_app
+//   LD_PRELOAD=./build/lib/nvbit_tool/libprlx_nvbit.so
+//   PRLX_TRACE=trace.prlx ./my_cuda_app
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -26,7 +21,6 @@
 #include "trace_writer.h"
 
 // Device-side globals (must match inject_funcs.cu declarations)
-__managed__ ChannelDev* prlx_channel_dev_ptr = nullptr;
 extern "C" __device__ __noinline__ ChannelDev* prlx_channel_dev;
 extern "C" __device__ __noinline__ uint64_t prlx_grid_launch_id;
 extern "C" __device__ __noinline__ int prlx_enabled;
@@ -34,9 +28,9 @@ extern "C" __device__ __noinline__ int prlx_enabled;
 // ---- Configuration (from environment variables) ----
 static struct {
     std::string trace_path = "trace.prlx";
-    std::string session_dir;         // Empty = single file mode
+    std::string session_dir;
     std::string sites_path = "prlx-sites.json";
-    std::string filter_pattern;      // Empty = instrument all
+    std::string filter_pattern;
     uint32_t buffer_size = PRLX_NVBIT_DEFAULT_BUFFER_SIZE;
     uint32_t sample_rate = 1;
     bool enabled = true;
@@ -56,12 +50,12 @@ static std::mutex g_instrument_mutex;
 static ChannelHost g_channel_host;
 static ChannelDev* g_channel_dev = nullptr;
 static volatile bool g_receiver_running = false;
-static std::thread* g_receiver_thread = nullptr;
+
+#define CHANNEL_SIZE (1 << 20)
 
 // ---- SASS opcode classification ----
 
 static bool is_branch_opcode(const char* opcode) {
-    // SASS branch/jump opcodes
     return (strcmp(opcode, "BRA") == 0 ||
             strcmp(opcode, "BRX") == 0 ||
             strcmp(opcode, "JMP") == 0 ||
@@ -91,14 +85,13 @@ static bool is_func_exit_opcode(const char* opcode) {
 }
 
 // ---- Receiver thread ----
-// Consumes channel events from device and feeds them to the trace writer.
+// pthreads callback — consumes channel events and feeds to trace writer.
 
-static void receiver_thread_func() {
-    char* recv_buffer = nullptr;
-    size_t recv_buffer_size = 0;
+static void* recv_thread_fun(void* args) {
+    char* recv_buffer = (char*)malloc(CHANNEL_SIZE);
 
     while (g_receiver_running) {
-        uint32_t num_recv_bytes = g_channel_host.recv(recv_buffer, recv_buffer_size);
+        uint32_t num_recv_bytes = g_channel_host.recv(recv_buffer, CHANNEL_SIZE);
 
         if (num_recv_bytes > 0) {
             uint32_t num_events = num_recv_bytes / sizeof(prlx_channel_event_t);
@@ -108,25 +101,23 @@ static void receiver_thread_func() {
                 const prlx_channel_event_t* events =
                     reinterpret_cast<const prlx_channel_event_t*>(recv_buffer);
                 for (uint32_t i = 0; i < num_events; i++) {
-                    // Translate SASS PC to site_id using site table
                     prlx_channel_event_t translated = events[i];
                     translated.site_id = g_site_table.lookup(events[i].site_id);
                     g_writer->add_event(translated);
                 }
             }
         } else {
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            usleep(100);
         }
     }
 
     free(recv_buffer);
+    return nullptr;
 }
 
 // ---- Kernel name filter ----
 static bool matches_filter(const std::string& kernel_name) {
     if (g_config.filter_pattern.empty()) return true;
-
-    // Substring match — glob patterns not supported yet
     return kernel_name.find(g_config.filter_pattern) != std::string::npos;
 }
 
@@ -152,14 +143,12 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
 
         const char* filename = "";
         uint32_t line = 0;
-        // NVBit provides line info via the instruction's debug info
-        // (available when the binary was compiled with -lineinfo or -g)
 
-        uint8_t event_type = 255; // sentinel
+        uint8_t event_type = 255;
 
         if (first_instr) {
             event_type = PRLX_EVENT_FUNC_ENTRY;
-            uint32_t site_id = g_site_table.register_site(
+            g_site_table.register_site(
                 sass_pc, event_type, filename, func_name, line);
 
             nvbit_insert_call(instr, "prlx_instr_func_entry", IPOINT_BEFORE);
@@ -174,9 +163,11 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
 
             nvbit_insert_call(instr, "prlx_instr_branch", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
-            nvbit_add_call_arg_pred_val(instr);      // branch_taken
+            // Guard predicate IS the branch condition for conditional branches.
+            // For unconditional branches, guard is always 1.
+            nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
-            nvbit_add_call_arg_const_val64(instr, 0); // grid_id placeholder
+            nvbit_add_call_arg_const_val64(instr, 0);
         }
         else if (is_shmem_store_opcode(opcode)) {
             event_type = PRLX_EVENT_SHMEM_STORE;
@@ -185,8 +176,8 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             nvbit_insert_call(instr, "prlx_instr_shmem_store", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
-            nvbit_add_call_arg_mref_addr64(instr, 0); // address
-            nvbit_add_call_arg_const_val32(instr, 0);  // value: not extractable at SASS level
+            nvbit_add_call_arg_mref_addr64(instr, 0);
+            nvbit_add_call_arg_const_val32(instr, 0);
         }
         else if (is_atomic_opcode(opcode)) {
             event_type = PRLX_EVENT_ATOMIC;
@@ -195,8 +186,8 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             nvbit_insert_call(instr, "prlx_instr_atomic", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
-            nvbit_add_call_arg_mref_addr64(instr, 0); // address
-            nvbit_add_call_arg_const_val32(instr, 0);  // operand: not extractable at SASS level
+            nvbit_add_call_arg_mref_addr64(instr, 0);
+            nvbit_add_call_arg_const_val32(instr, 0);
         }
         else if (is_func_exit_opcode(opcode)) {
             event_type = PRLX_EVENT_FUNC_EXIT;
@@ -211,7 +202,7 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
 
 // ---- NVBit callbacks ----
 
-void nvbit_tool_init() {
+void nvbit_at_init() {
     if (const char* v = getenv("PRLX_ENABLED")) {
         g_config.enabled = (atoi(v) != 0);
     }
@@ -220,27 +211,13 @@ void nvbit_tool_init() {
         return;
     }
 
-    if (const char* v = getenv("PRLX_TRACE")) {
-        g_config.trace_path = v;
-    }
-    if (const char* v = getenv("PRLX_SESSION")) {
-        g_config.session_dir = v;
-    }
-    if (const char* v = getenv("PRLX_SITES")) {
-        g_config.sites_path = v;
-    }
-    if (const char* v = getenv("PRLX_FILTER")) {
-        g_config.filter_pattern = v;
-    }
-    if (const char* v = getenv("PRLX_BUFFER_SIZE")) {
-        g_config.buffer_size = atoi(v);
-    }
-    if (const char* v = getenv("PRLX_SAMPLE_RATE")) {
-        g_config.sample_rate = atoi(v);
-    }
-    if (const char* v = getenv("PRLX_COMPRESS")) {
-        g_config.compress = (atoi(v) != 0);
-    }
+    if (const char* v = getenv("PRLX_TRACE")) g_config.trace_path = v;
+    if (const char* v = getenv("PRLX_SESSION")) g_config.session_dir = v;
+    if (const char* v = getenv("PRLX_SITES")) g_config.sites_path = v;
+    if (const char* v = getenv("PRLX_FILTER")) g_config.filter_pattern = v;
+    if (const char* v = getenv("PRLX_BUFFER_SIZE")) g_config.buffer_size = atoi(v);
+    if (const char* v = getenv("PRLX_SAMPLE_RATE")) g_config.sample_rate = atoi(v);
+    if (const char* v = getenv("PRLX_COMPRESS")) g_config.compress = (atoi(v) != 0);
 
     fprintf(stderr, "[prlx-nvbit] Initialized: trace=%s, buffer=%u, filter='%s'\n",
             g_config.trace_path.c_str(),
@@ -248,27 +225,23 @@ void nvbit_tool_init() {
             g_config.filter_pattern.c_str());
 
     g_writer = new prlx::TraceWriter(g_config.buffer_size);
-    g_channel_host.init(0, nullptr, sizeof(prlx_channel_event_t), 1 << 20);
-
-    g_receiver_running = true;
-    g_receiver_thread = new std::thread(receiver_thread_func);
-
-    // Set device-side channel pointer
-    // (Will be set per-context in nvbit_at_cuda_event)
 }
 
-void nvbit_tool_exit() {
+void nvbit_at_ctx_init(CUcontext ctx) {
+    if (!g_config.enabled) return;
+
+    cudaMallocManaged(&g_channel_dev, sizeof(ChannelDev));
+    g_receiver_running = true;
+    g_channel_host.init(0, CHANNEL_SIZE, g_channel_dev,
+                        recv_thread_fun, nullptr);
+    nvbit_set_tool_pthread(g_channel_host.get_thread());
+}
+
+void nvbit_at_ctx_term(CUcontext ctx) {
     if (!g_config.enabled) return;
 
     g_receiver_running = false;
-    if (g_receiver_thread) {
-        g_receiver_thread->join();
-        delete g_receiver_thread;
-        g_receiver_thread = nullptr;
-    }
-
-    // Flush any remaining events
-    g_channel_host.stop();
+    g_channel_host.destroy(false);
 
     if (g_writer && g_writer->total_events() > 0) {
         std::lock_guard<std::mutex> lock(g_writer_mutex);
@@ -281,6 +254,11 @@ void nvbit_tool_exit() {
 
     delete g_writer;
     g_writer = nullptr;
+
+    if (g_channel_dev) {
+        cudaFree(g_channel_dev);
+        g_channel_dev = nullptr;
+    }
 
     fprintf(stderr, "[prlx-nvbit] Shutdown: %u launches instrumented, %zu sites\n",
             g_launch_count, g_site_table.size());
@@ -301,12 +279,10 @@ void nvbit_at_cuda_event(
         cuLaunchKernel_params* p = (cuLaunchKernel_params*)params;
 
         if (!is_exit) {
-            // Pre-launch: instrument the function and set up tracing
             instrument_function(ctx, p->f);
 
             const char* kernel_name = nvbit_get_func_name(ctx, p->f, true);
 
-            int dev = 0;
             CUdevice cu_dev;
             cuCtxGetDevice(&cu_dev);
             int major = 0, minor = 0;
@@ -330,13 +306,11 @@ void nvbit_at_cuda_event(
             int enabled_val = 1;
             cudaMemcpyToSymbol(prlx_enabled, &enabled_val, sizeof(int));
             cudaMemcpyToSymbol(prlx_grid_launch_id, &g_grid_launch_id, sizeof(uint64_t));
+            cudaMemcpyToSymbol(prlx_channel_dev, &g_channel_dev, sizeof(ChannelDev*));
 
             g_launch_count++;
         } else {
-            // Post-launch: drain the channel
-            g_channel_host.stop();
-
-            // If in session mode, write per-kernel file and clear
+            // Post-launch: session mode writes per-kernel files
             if (!g_config.session_dir.empty()) {
                 std::lock_guard<std::mutex> lock(g_writer_mutex);
                 if (g_writer && g_writer->total_events() > 0) {

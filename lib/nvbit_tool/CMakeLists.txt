@@ -57,7 +57,7 @@ target_include_directories(prlx_nvbit_inject PRIVATE
 )
 set_target_properties(prlx_nvbit_inject PROPERTIES
     CUDA_ARCHITECTURES "${PRLX_CUDA_ARCHITECTURES}"
-    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_SEPARABLE_COMPILATION OFF
 )
 # NVBit requires specific compilation flags for injected functions:
 # -maxrregcount=24: limit register usage for injected code

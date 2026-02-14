@@ -3,6 +3,7 @@
 use prlx_diff::differ::{diff_traces, DiffConfig, DivergenceKind};
 use prlx_diff::trace_format::*;
 use std::io::Write;
+use bytemuck;
 use tempfile::NamedTempFile;
 
 /// Helper: Create a minimal valid trace file with given events
@@ -461,5 +462,232 @@ fn test_value_divergence() {
             assert_eq!(val_b, 200);
         }
         _ => panic!("Expected Value divergence"),
+    }
+}
+
+/// Helper: Create a trace file with snapshot data attached.
+/// The snapshot section follows directly after the event buffers.
+fn create_trace_with_snapshots(
+    kernel_name: &str,
+    events: &[Vec<TraceEvent>],
+    snapshot_depth: u32,
+    snapshots: &[Vec<SnapshotEntry>],
+) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    let num_warps = events.len() as u32;
+
+    let warp_buffer_size = std::mem::size_of::<WarpBufferHeader>()
+        + PRLX_EVENTS_PER_WARP * std::mem::size_of::<TraceEvent>();
+    let event_section_size = num_warps as usize * warp_buffer_size;
+    let snap_ring_size =
+        std::mem::size_of::<SnapshotRingHeader>() + snapshot_depth as usize * std::mem::size_of::<SnapshotEntry>();
+
+    let mut header = TraceFileHeader {
+        magic: PRLX_MAGIC,
+        version: PRLX_VERSION,
+        flags: PRLX_FLAG_SNAPSHOT,
+        kernel_name_hash: 0xDEADBEEF,
+        kernel_name: [0; 64],
+        grid_dim: [1, 1, 1],
+        block_dim: [32, 1, 1],
+        num_warps_per_block: 1,
+        total_warp_slots: num_warps,
+        events_per_warp: PRLX_EVENTS_PER_WARP as u32,
+        _pad: 0,
+        timestamp: 999,
+        cuda_arch: 80,
+        history_depth: 0,
+        history_section_offset: 0,
+        sample_rate: 0,
+        snapshot_depth,
+        snapshot_section_offset: (std::mem::size_of::<TraceFileHeader>() + event_section_size) as u32,
+    };
+
+    let name_bytes = kernel_name.as_bytes();
+    let copy_len = name_bytes.len().min(63);
+    header.kernel_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    file.write_all(bytemuck::bytes_of(&header)).unwrap();
+
+    // Write warp event buffers
+    for warp_events in events {
+        let warp_header = WarpBufferHeader {
+            write_idx: warp_events.len() as u32,
+            overflow_count: 0,
+            num_events: warp_events.len() as u32,
+            total_event_count: 0,
+        };
+        file.write_all(bytemuck::bytes_of(&warp_header)).unwrap();
+
+        for event in warp_events {
+            file.write_all(bytemuck::bytes_of(event)).unwrap();
+        }
+
+        let remaining = PRLX_EVENTS_PER_WARP - warp_events.len();
+        let zero_event = TraceEvent {
+            site_id: 0, event_type: 0, branch_dir: 0, _reserved: 0,
+            active_mask: 0, value_a: 0,
+        };
+        for _ in 0..remaining {
+            file.write_all(bytemuck::bytes_of(&zero_event)).unwrap();
+        }
+    }
+
+    // Write snapshot section (one ring per warp)
+    for (w, warp_snaps) in snapshots.iter().enumerate() {
+        let ring_header = SnapshotRingHeader {
+            write_idx: warp_snaps.len() as u32,
+            depth: snapshot_depth,
+            total_writes: warp_snaps.len() as u32,
+            _reserved: 0,
+        };
+        file.write_all(bytemuck::bytes_of(&ring_header)).unwrap();
+
+        for snap in warp_snaps {
+            file.write_all(bytemuck::bytes_of(snap)).unwrap();
+        }
+
+        // Pad remaining slots with zeros
+        let remaining = snapshot_depth as usize - warp_snaps.len();
+        let zero_snap = SnapshotEntry {
+            site_id: 0, active_mask: 0, seq: 0, cmp_predicate: 0,
+            lhs_values: [0; 32], rhs_values: [0; 32], _pad: [0; 4],
+        };
+        for _ in 0..remaining {
+            file.write_all(bytemuck::bytes_of(&zero_snap)).unwrap();
+        }
+    }
+
+    // Fill snapshot rings for warps that have events but no snapshot data
+    for _ in snapshots.len()..events.len() {
+        let ring_header = SnapshotRingHeader {
+            write_idx: 0, depth: snapshot_depth, total_writes: 0, _reserved: 0,
+        };
+        file.write_all(bytemuck::bytes_of(&ring_header)).unwrap();
+        let zero_snap = SnapshotEntry {
+            site_id: 0, active_mask: 0, seq: 0, cmp_predicate: 0,
+            lhs_values: [0; 32], rhs_values: [0; 32], _pad: [0; 4],
+        };
+        for _ in 0..snapshot_depth {
+            file.write_all(bytemuck::bytes_of(&zero_snap)).unwrap();
+        }
+    }
+
+    file.flush().unwrap();
+    file
+}
+
+/// Test 7: Snapshot data flows through parser → differ → report
+/// Verifies the full pipeline: trace with snapshot section → parser reads it →
+/// differ attaches SnapshotContext to branch divergence → per-lane operands accessible.
+#[test]
+fn test_snapshot_integration() {
+    let branch_site = 0x1000u32;
+
+    // Both traces have same branch event at site 0x1000, but different directions
+    let events_a = vec![vec![TraceEvent {
+        site_id: branch_site,
+        event_type: 0, // Branch
+        branch_dir: 1, // TAKEN
+        _reserved: 0,
+        active_mask: 0xFFFFFFFF,
+        value_a: 0,
+    }]];
+
+    let events_b = vec![vec![TraceEvent {
+        site_id: branch_site,
+        event_type: 0,
+        branch_dir: 0, // NOT-TAKEN
+        _reserved: 0,
+        active_mask: 0xFFFFFFFF,
+        value_a: 0,
+    }]];
+
+    // Snapshot A: threshold=10, all lanes compare their index against 10
+    let mut snap_a = SnapshotEntry {
+        site_id: branch_site,
+        active_mask: 0xFFFFFFFF,
+        seq: 0,
+        cmp_predicate: 38, // ICMP_SGT
+        lhs_values: [0; 32],
+        rhs_values: [0; 32],
+        _pad: [0; 4],
+    };
+    for i in 0..32 {
+        snap_a.lhs_values[i] = i as u32;  // lane value = lane index
+        snap_a.rhs_values[i] = 10;         // threshold = 10
+    }
+
+    // Snapshot B: threshold=64, same lane values
+    let mut snap_b = SnapshotEntry {
+        site_id: branch_site,
+        active_mask: 0xFFFFFFFF,
+        seq: 0,
+        cmp_predicate: 38,
+        lhs_values: [0; 32],
+        rhs_values: [0; 32],
+        _pad: [0; 4],
+    };
+    for i in 0..32 {
+        snap_b.lhs_values[i] = i as u32;
+        snap_b.rhs_values[i] = 64;         // threshold = 64
+    }
+
+    let file_a = create_trace_with_snapshots("test_kernel", &events_a, 4, &[vec![snap_a]]);
+    let file_b = create_trace_with_snapshots("test_kernel", &events_b, 4, &[vec![snap_b]]);
+
+    // Verify parser reads snapshot data
+    let trace_a = prlx_diff::parser::TraceFile::open(file_a.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(file_b.path()).unwrap();
+
+    assert!(trace_a.has_snapshot(), "Trace A should have snapshot data");
+    assert!(trace_b.has_snapshot(), "Trace B should have snapshot data");
+
+    // Verify parser can retrieve snapshot for warp 0
+    let snap_a_parsed = trace_a.get_snapshot_for_site(0, branch_site).unwrap();
+    assert!(snap_a_parsed.is_some(), "Should find snapshot for site in trace A");
+    let snap_a_parsed = snap_a_parsed.unwrap();
+    assert_eq!(snap_a_parsed.rhs_values[0], 10, "A: rhs lane 0 should be threshold=10");
+    assert_eq!(snap_a_parsed.lhs_values[5], 5, "A: lhs lane 5 should be 5");
+
+    let snap_b_parsed = trace_b.get_snapshot_for_site(0, branch_site).unwrap();
+    assert!(snap_b_parsed.is_some());
+    let snap_b_parsed = snap_b_parsed.unwrap();
+    assert_eq!(snap_b_parsed.rhs_values[0], 64, "B: rhs lane 0 should be threshold=64");
+
+    // Run the differ — it should detect branch divergence AND attach snapshot context
+    let config = DiffConfig::default();
+    let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
+
+    assert!(!result.is_identical());
+    assert_eq!(result.divergences.len(), 1);
+
+    let div = &result.divergences[0];
+    assert_eq!(div.site_id, branch_site);
+
+    match div.kind {
+        DivergenceKind::Branch { dir_a, dir_b } => {
+            assert_eq!(dir_a, 1); // TAKEN
+            assert_eq!(dir_b, 0); // NOT-TAKEN
+        }
+        _ => panic!("Expected Branch divergence, got {:?}", div.kind),
+    }
+
+    // The snapshot context should be attached
+    let snap_ctx = div.snapshot.as_ref().expect("Divergence should have snapshot context");
+    assert_eq!(snap_ctx.cmp_predicate, 38, "Should preserve ICmp predicate");
+
+    // Verify per-lane operands came through
+    assert_eq!(snap_ctx.rhs_a[0], 10, "Snapshot A rhs should be threshold=10");
+    assert_eq!(snap_ctx.rhs_b[0], 64, "Snapshot B rhs should be threshold=64");
+    assert_eq!(snap_ctx.lhs_a[15], 15, "Snapshot A lhs lane 15 should be 15");
+    assert_eq!(snap_ctx.lhs_b[15], 15, "Snapshot B lhs lane 15 should be 15");
+
+    // The key insight: A:rhs=10 vs B:rhs=64 explains the divergence
+    for lane in 0..32 {
+        assert_eq!(snap_ctx.lhs_a[lane], snap_ctx.lhs_b[lane],
+            "LHS should be identical across traces (same input data)");
+        assert_ne!(snap_ctx.rhs_a[lane], snap_ctx.rhs_b[lane],
+            "RHS should differ (different threshold)");
     }
 }

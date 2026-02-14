@@ -4,6 +4,8 @@
 #include <cstring>
 #include <cstdio>
 #include <ctime>
+#include <sys/stat.h>
+#include <errno.h>
 
 #ifdef PRLX_HAS_ZSTD
 #include <zstd.h>
@@ -497,10 +499,9 @@ extern "C" void prlx_session_begin(const char* name) {
 
     snprintf(session_dir, sizeof(session_dir), "%s", name);
 
-    // Create session directory (best-effort, may already exist)
-    char mkdir_cmd[512];
-    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", session_dir);
-    system(mkdir_cmd);
+    if (mkdir(session_dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "[prlx] Warning: failed to create session directory: %s\n", session_dir);
+    }
 
     session_active = true;
     session_launch_count = 0;

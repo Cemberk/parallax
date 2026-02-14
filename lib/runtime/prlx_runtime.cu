@@ -285,7 +285,6 @@ extern "C" __device__ void __prlx_record_snapshot(
     uint32_t rhs,
     uint32_t cmp_pred
 ) {
-    // Early exit if snapshots are disabled (all lanes check this together)
     char* snap_buf = g_prlx_snapshot_buffer;
     if (snap_buf == nullptr) return;
 
@@ -293,6 +292,14 @@ extern "C" __device__ void __prlx_record_snapshot(
     if (depth == 0) return;
 
     if (!__prlx_recording_enabled) return;
+
+    // Respect sample rate to reduce overhead on hot comparisons
+    if (__prlx_sample_rate > 1) {
+        uint32_t warp = __prlx_warp_id();
+        uint32_t ring_size = sizeof(SnapshotRingHeader) + depth * sizeof(SnapshotEntry);
+        SnapshotRingHeader* ring = (SnapshotRingHeader*)(snap_buf + warp * ring_size);
+        if ((ring->total_writes % __prlx_sample_rate) != 0) return;
+    }
 
     // Get active mask BEFORE any conditional returns
     uint32_t active = __activemask();

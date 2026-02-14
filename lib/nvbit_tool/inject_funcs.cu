@@ -7,7 +7,7 @@
 //   -maxrregcount=24 -Xptxas -astoolspatch --keep-device-functions
 
 #include <stdint.h>
-#include "nvbit.h"
+#include "utils/channel.hpp"
 #include "common.h"
 
 // Channel device-side handle (set by host via cudaMemcpyToSymbol)
