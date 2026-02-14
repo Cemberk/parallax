@@ -3,8 +3,8 @@
 try:
     from importlib.metadata import version as _meta_version
     __version__ = _meta_version("prlx")
-except (ImportError, ModuleNotFoundError):
-    __version__ = "0.1.0"
+except Exception:
+    __version__ = "0.0.0.dev0"
 
 from .trace_reader import read_trace, TraceData
 from ._find_lib import find_differ_binary

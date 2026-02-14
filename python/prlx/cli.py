@@ -10,7 +10,11 @@ from pathlib import Path
 
 from . import _find_lib
 
-PRLX_VERSION = "0.1.0"
+try:
+    from importlib.metadata import version as _meta_version
+    PRLX_VERSION = _meta_version("prlx")
+except Exception:
+    PRLX_VERSION = "dev"
 
 PRLX_BANNER = r"""
  ____  ____  _     __  __
