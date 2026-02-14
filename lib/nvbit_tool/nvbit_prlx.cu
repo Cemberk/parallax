@@ -3,6 +3,9 @@
 // Usage:
 //   LD_PRELOAD=./build/lib/nvbit_tool/libprlx_nvbit.so
 //   PRLX_TRACE=trace.prlx ./my_cuda_app
+//
+// Following NVBit 1.7.7+ pattern: channel_dev and grid_launch_id are passed
+// to inject functions as arguments (not extern __device__ globals).
 
 #include <cstdio>
 #include <cstdlib>
@@ -19,11 +22,6 @@
 #include "common.h"
 #include "site_table.h"
 #include "trace_writer.h"
-
-// Device-side globals (must match inject_funcs.cu declarations)
-extern "C" __device__ __noinline__ ChannelDev* prlx_channel_dev;
-extern "C" __device__ __noinline__ uint64_t prlx_grid_launch_id;
-extern "C" __device__ __noinline__ int prlx_enabled;
 
 // ---- Configuration (from environment variables) ----
 static struct {
@@ -122,6 +120,9 @@ static bool matches_filter(const std::string& kernel_name) {
 }
 
 // ---- Instrumentation ----
+// Each inject function receives grid_launch_id via nvbit_add_call_arg_launch_val64
+// (set per-launch with nvbit_set_at_launch) and channel_dev pointer via
+// nvbit_add_call_arg_const_val64 (set once at instrumentation time).
 
 static void instrument_function(CUcontext ctx, CUfunction func) {
     std::lock_guard<std::mutex> lock(g_instrument_mutex);
@@ -151,9 +152,12 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             g_site_table.register_site(
                 sass_pc, event_type, filename, func_name, line);
 
+            // prlx_instr_func_entry(pred, sass_pc, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_func_entry", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
+            nvbit_add_call_arg_launch_val64(instr, 0);
+            nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
             first_instr = false;
         }
 
@@ -161,41 +165,50 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             event_type = PRLX_EVENT_BRANCH;
             g_site_table.register_site(sass_pc, event_type, filename, func_name, line);
 
+            // prlx_instr_branch(pred, branch_taken, sass_pc, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_branch", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
-            // Guard predicate IS the branch condition for conditional branches.
-            // For unconditional branches, guard is always 1.
-            nvbit_add_call_arg_guard_pred_val(instr);
+            nvbit_add_call_arg_guard_pred_val(instr);  // branch direction = guard predicate
             nvbit_add_call_arg_const_val32(instr, sass_pc);
-            nvbit_add_call_arg_const_val64(instr, 0);
+            nvbit_add_call_arg_launch_val64(instr, 0);
+            nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
         }
         else if (is_shmem_store_opcode(opcode)) {
             event_type = PRLX_EVENT_SHMEM_STORE;
             g_site_table.register_site(sass_pc, event_type, filename, func_name, line);
 
+            // prlx_instr_shmem_store(pred, sass_pc, addr, value, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_shmem_store", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
             nvbit_add_call_arg_mref_addr64(instr, 0);
             nvbit_add_call_arg_const_val32(instr, 0);
+            nvbit_add_call_arg_launch_val64(instr, 0);
+            nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
         }
         else if (is_atomic_opcode(opcode)) {
             event_type = PRLX_EVENT_ATOMIC;
             g_site_table.register_site(sass_pc, event_type, filename, func_name, line);
 
+            // prlx_instr_atomic(pred, sass_pc, addr, operand, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_atomic", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
             nvbit_add_call_arg_mref_addr64(instr, 0);
             nvbit_add_call_arg_const_val32(instr, 0);
+            nvbit_add_call_arg_launch_val64(instr, 0);
+            nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
         }
         else if (is_func_exit_opcode(opcode)) {
             event_type = PRLX_EVENT_FUNC_EXIT;
             g_site_table.register_site(sass_pc, event_type, filename, func_name, line);
 
+            // prlx_instr_func_exit(pred, sass_pc, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_func_exit", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
+            nvbit_add_call_arg_launch_val64(instr, 0);
+            nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
         }
     }
 }
@@ -225,12 +238,15 @@ void nvbit_at_init() {
             g_config.filter_pattern.c_str());
 
     g_writer = new prlx::TraceWriter(g_config.buffer_size);
+
+    // Allocate channel device memory here (not in nvbit_at_ctx_init) to avoid
+    // deadlocks — NVBit 1.7.7+ warns against CUDA allocations in ctx_init.
+    cudaMallocManaged(&g_channel_dev, sizeof(ChannelDev));
 }
 
 void nvbit_at_ctx_init(CUcontext ctx) {
     if (!g_config.enabled) return;
 
-    cudaMallocManaged(&g_channel_dev, sizeof(ChannelDev));
     g_receiver_running = true;
     g_channel_host.init(0, CHANNEL_SIZE, g_channel_dev,
                         recv_thread_fun, nullptr);
@@ -303,10 +319,9 @@ void nvbit_at_cuda_event(
 
             g_grid_launch_id++;
 
-            int enabled_val = 1;
-            cudaMemcpyToSymbol(prlx_enabled, &enabled_val, sizeof(int));
-            cudaMemcpyToSymbol(prlx_grid_launch_id, &g_grid_launch_id, sizeof(uint64_t));
-            cudaMemcpyToSymbol(prlx_channel_dev, &g_channel_dev, sizeof(ChannelDev*));
+            // Pass grid_launch_id to inject functions via nvbit_set_at_launch
+            // (fills the slot created by nvbit_add_call_arg_launch_val64)
+            nvbit_set_at_launch(ctx, p->f, (uint64_t)g_grid_launch_id);
 
             g_launch_count++;
         } else {

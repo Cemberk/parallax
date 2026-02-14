@@ -32,3 +32,4 @@ where = ["python"]
 prlx = ["data/bin/*", "data/lib/*", "data/include/*"]
 
 [tool.setuptools_scm]
+fallback_version = "0.1.0.dev0"
