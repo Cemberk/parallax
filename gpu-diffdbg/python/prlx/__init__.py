@@ -9,7 +9,11 @@ Public API:
     session(name)            - Context manager for multi-kernel pipeline tracing
 """
 
-__version__ = "0.1.0"
+try:
+    from importlib.metadata import version as _meta_version
+    __version__ = _meta_version("prlx")
+except Exception:
+    __version__ = "0.1.0"
 
 from .trace_reader import read_trace, TraceData
 from ._find_lib import find_differ_binary
@@ -67,7 +71,7 @@ def diff_traces(trace_a: str, trace_b: str, **kwargs) -> int:
     if differ is None:
         raise FileNotFoundError(
             "prlx-diff binary not found. "
-            "Build with: cd differ && cargo build --release"
+            "Install with: pip install prlx"
         )
 
     cmd = [str(differ), str(trace_a), str(trace_b)]

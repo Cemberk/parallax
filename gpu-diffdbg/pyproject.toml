@@ -1,23 +1,32 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "prlx"
 version = "0.1.0"
 description = "Differential debugger for CUDA/Triton GPU kernels"
-
-license = {text = "MIT"}
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.8"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Topic :: Software Development :: Debuggers",
     "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
 ]
+dependencies = []
 
 [project.optional-dependencies]
 triton = ["triton>=2.0"]
+all = ["triton>=2.0"]
+
+[project.scripts]
+prlx = "prlx.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["python"]
+
+[tool.setuptools.package-data]
+prlx = ["data/bin/*", "data/lib/*", "data/include/*"]

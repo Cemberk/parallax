@@ -51,6 +51,14 @@ prlx-sites.json
 
 # Python packaging
 *.egg-info/
+dist/
+build-prlx/
+
+# Bundled package data (populated by build_wheel.sh, not checked in)
+python/prlx/data/bin/
+python/prlx/data/lib/
+python/prlx/data/include/
+!python/prlx/data/.gitkeep
 
 # Virtual environment
 .venv/
