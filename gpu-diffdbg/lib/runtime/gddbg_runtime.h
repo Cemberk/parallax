@@ -28,6 +28,9 @@ extern __device__ TraceBuffer* g_gddbg_buffer;
 extern __device__ char* g_gddbg_history_buffer;
 extern __device__ uint32_t g_gddbg_history_depth;
 
+// Sampling rate (1 = record all events, N = record 1 out of every N events)
+extern __device__ uint32_t __gddbg_sample_rate;
+
 // ---- Region of Interest (ROI) Toggle ----
 // Users can enable/disable recording from within their kernel code.
 // This allows targeting specific code paths or time slices.
@@ -88,6 +91,10 @@ extern "C" {
     void gddbg_pre_launch(const char* kernel_name, dim3 gridDim, dim3 blockDim);
     void gddbg_post_launch(void);
     void gddbg_shutdown(void);
+
+    // Session API: capture multiple kernel launches into a directory with manifest
+    void gddbg_session_begin(const char* name);
+    void gddbg_session_end(void);
 }
 
 #else
@@ -104,6 +111,8 @@ void gddbg_init(void);
 void gddbg_pre_launch(const char* kernel_name, dim3 gridDim, dim3 blockDim);
 void gddbg_post_launch(void);
 void gddbg_shutdown(void);
+void gddbg_session_begin(const char* name);
+void gddbg_session_end(void);
 
 #ifdef __cplusplus
 }

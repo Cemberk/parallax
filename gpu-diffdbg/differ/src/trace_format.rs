@@ -16,6 +16,7 @@ pub const GDDBG_EVENTS_PER_WARP: usize = 4096;
 pub const GDDBG_FLAG_COMPACT: u32 = 0x1;
 pub const GDDBG_FLAG_COMPRESS: u32 = 0x2;
 pub const GDDBG_FLAG_HISTORY: u32 = 0x4;
+pub const GDDBG_FLAG_SAMPLED: u32 = 0x8;
 
 /// Default history ring depth (entries per warp)
 pub const GDDBG_HISTORY_DEPTH_DEFAULT: usize = 64;
@@ -59,7 +60,8 @@ pub struct TraceFileHeader {
     // History / reserved fields (20 bytes to reach 160 total)
     pub history_depth: u32,         // 4 bytes, offset 140 (history entries per warp)
     pub history_section_offset: u32, // 4 bytes, offset 144 (byte offset to history, 0=auto)
-    pub _reserved: [u32; 3],        // 12 bytes, offset 148
+    pub sample_rate: u32,           // 4 bytes, offset 148 (1 = all, N = 1/N events)
+    pub _reserved: [u32; 2],        // 8 bytes, offset 152
 }
 
 // Compile-time assertion that header is exactly 160 bytes
@@ -91,7 +93,7 @@ pub struct WarpBufferHeader {
     pub write_idx: u32,         // Current write position (atomic)
     pub overflow_count: u32,    // Number of dropped events
     pub num_events: u32,        // Actual events written
-    pub _reserved: u32,         // Padding
+    pub total_event_count: u32, // Total events seen (including sampled-out)
 }
 
 const _: () = assert!(std::mem::size_of::<WarpBufferHeader>() == 16);

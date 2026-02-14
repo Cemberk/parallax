@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 
 use crate::parser::TraceFile;
+use crate::site_map::SiteRemapper;
 use crate::trace_format::TraceEvent;
 
 /// Configuration for differential analysis
@@ -93,11 +94,23 @@ impl DiffResult {
     }
 }
 
-/// Compare two trace files and detect divergences
+/// Compare two trace files and detect divergences.
+/// If a `SiteRemapper` is provided, trace B's site_ids are translated to
+/// trace A's address space before comparison, enabling cross-compilation diff.
 pub fn diff_traces(
     trace_a: &TraceFile,
     trace_b: &TraceFile,
     config: &DiffConfig,
+) -> Result<DiffResult> {
+    diff_traces_with_remap(trace_a, trace_b, config, None)
+}
+
+/// Compare two trace files with optional site_id remapping
+pub fn diff_traces_with_remap(
+    trace_a: &TraceFile,
+    trace_b: &TraceFile,
+    config: &DiffConfig,
+    remapper: Option<&SiteRemapper>,
 ) -> Result<DiffResult> {
     // Validate headers are compatible
     validate_traces(trace_a, trace_b)?;
@@ -121,8 +134,24 @@ pub fn diff_traces(
                 Err(_) => return Vec::new(),
             };
 
+            // Apply site_id remapping to trace B if remapper is provided
+            let remapped_b;
+            let effective_b = if let Some(remap) = remapper {
+                remapped_b = events_b
+                    .iter()
+                    .map(|e| {
+                        let mut re = *e;
+                        re.site_id = remap.translate(e.site_id);
+                        re
+                    })
+                    .collect::<Vec<_>>();
+                &remapped_b[..]
+            } else {
+                events_b
+            };
+
             // Diff this warp with bounded lookahead
-            diff_single_warp(warp_idx as u32, events_a, events_b, config)
+            diff_single_warp(warp_idx as u32, events_a, effective_b, config)
         })
         .collect();
 
@@ -375,4 +404,37 @@ fn diff_single_warp(
     }
 
     divergences
+}
+
+/// Result of a session diff (multiple kernel launches)
+pub struct SessionDiffResult {
+    pub kernel_results: Vec<(String, u32, Result<DiffResult>)>,
+}
+
+/// Compare two session directories by matching kernel launches
+pub fn diff_session(
+    session_a: &crate::parser::SessionManifest,
+    session_b: &crate::parser::SessionManifest,
+    config: &DiffConfig,
+) -> SessionDiffResult {
+    let mut kernel_results = Vec::new();
+
+    // Match launches by (kernel_name, launch_index)
+    for launch_a in &session_a.launches {
+        // Find matching launch in session B
+        let matching_b = session_b.launches.iter().find(|lb| {
+            lb.kernel == launch_a.kernel && lb.launch == launch_a.launch
+        });
+
+        if let Some(launch_b) = matching_b {
+            let result = (|| -> Result<DiffResult> {
+                let trace_a = session_a.open_trace(launch_a)?;
+                let trace_b = session_b.open_trace(launch_b)?;
+                diff_traces(&trace_a, &trace_b, config)
+            })();
+            kernel_results.push((launch_a.kernel.clone(), launch_a.launch, result));
+        }
+    }
+
+    SessionDiffResult { kernel_results }
 }

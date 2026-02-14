@@ -70,6 +70,14 @@ class GddbgRuntime:
         self._lib.gddbg_shutdown.restype = None
         self._lib.gddbg_shutdown.argtypes = []
 
+        # void gddbg_session_begin(const char* name)
+        self._lib.gddbg_session_begin.restype = None
+        self._lib.gddbg_session_begin.argtypes = [ctypes.c_char_p]
+
+        # void gddbg_session_end(void)
+        self._lib.gddbg_session_end.restype = None
+        self._lib.gddbg_session_end.argtypes = []
+
     def init(self):
         """Initialize the tracing system. Reads GDDBG_* environment variables."""
         self._lib.gddbg_init()
@@ -112,6 +120,16 @@ class GddbgRuntime:
     def post_launch(self):
         """Copy trace buffer from device and write to file."""
         self._lib.gddbg_post_launch()
+
+    def session_begin(self, name: str):
+        """Begin a session (multi-kernel tracing). Creates a directory for traces."""
+        if not self._initialized:
+            self.init()
+        self._lib.gddbg_session_begin(name.encode("utf-8"))
+
+    def session_end(self):
+        """End the current session and write the manifest."""
+        self._lib.gddbg_session_end()
 
     def shutdown(self):
         """Clean up resources."""
@@ -163,3 +181,26 @@ def tracing(
         yield rt
     finally:
         rt.post_launch()
+
+
+@contextmanager
+def session(name: str, lib_path: Optional[str] = None):
+    """
+    Context manager for session-based multi-kernel tracing.
+
+    Usage:
+        with gddbg.runtime.session("my_pipeline"):
+            # launch multiple kernels — each gets its own trace file
+            pass
+        # session.json manifest is written automatically
+
+    Args:
+        name: Session directory name (will be created).
+        lib_path: Explicit path to shared library.
+    """
+    rt = GddbgRuntime(lib_path)
+    rt.session_begin(name)
+    try:
+        yield rt
+    finally:
+        rt.session_end()

@@ -5,6 +5,7 @@ use colored::*;
 use crate::differ::{DiffResult, Divergence, DivergenceKind};
 use crate::parser::TraceFile;
 use crate::site_map::SiteMap;
+use crate::trace_format::GDDBG_FLAG_SAMPLED;
 
 /// Print a summary of the diff result
 pub fn print_summary(result: &DiffResult) {
@@ -306,4 +307,11 @@ pub fn print_trace_info(name: &str, trace: &TraceFile) {
     println!("Overflows:  {}", trace.total_overflows());
     println!("Timestamp:  {}", header.timestamp);
     println!("CUDA Arch:  SM_{}", header.cuda_arch);
+    if header.flags & GDDBG_FLAG_SAMPLED != 0 {
+        println!(
+            "Sampling:   1/{} (~{:.1}% of events recorded)",
+            header.sample_rate,
+            100.0 / header.sample_rate as f64
+        );
+    }
 }

@@ -23,6 +23,7 @@ struct SiteInfo {
     uint32_t site_id;
     SourceLocation location;
     uint8_t event_type;
+    uint32_t ordinal;  // Per-(function, event_type) ordinal for cross-compilation stability
 };
 
 // Manages site_id generation and source location mapping
@@ -57,8 +58,8 @@ private:
     // All recorded sites
     std::vector<SiteInfo> sites_;
 
-    // Monotonic counter for disambiguating sites without debug info
-    mutable uint32_t next_seq_ = 0;
+    // Per-(function, event_type) ordinal counters for cross-compilation stability
+    std::unordered_map<std::string, uint32_t> ordinal_counters_;
 };
 
 } // namespace gddbg

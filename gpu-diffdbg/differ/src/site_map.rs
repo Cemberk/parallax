@@ -15,6 +15,8 @@ pub struct SourceLocation {
     pub line: u32,
     pub column: u32,
     pub event_type: u8,
+    #[serde(default)]
+    pub ordinal: Option<u32>,
 }
 
 impl SourceLocation {
@@ -61,6 +63,63 @@ impl SiteMap {
     /// Check if the map is empty
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    /// Get all locations (for building remapper)
+    pub fn locations(&self) -> impl Iterator<Item = &SourceLocation> {
+        self.map.values()
+    }
+}
+
+/// Remaps site_ids from one compilation to another by matching
+/// (function, event_type, ordinal) tuples. This allows cross-compilation
+/// diff even when site_ids change due to different optimization levels,
+/// recompilations, or absence of debug info.
+pub struct SiteRemapper {
+    /// Maps trace_b site_id -> trace_a site_id
+    remap: HashMap<u32, u32>,
+}
+
+impl SiteRemapper {
+    /// Build a remapper from two site maps.
+    /// For each site in map_b, find the matching site in map_a by
+    /// (function, event_type, ordinal) and record the site_id mapping.
+    pub fn build(map_a: &SiteMap, map_b: &SiteMap) -> Self {
+        // Index map_a by (function, event_type, ordinal) -> site_id
+        let mut a_index: HashMap<(String, u8, u32), u32> = HashMap::new();
+        for loc in map_a.locations() {
+            if let Some(ord) = loc.ordinal {
+                a_index.insert(
+                    (loc.function.clone(), loc.event_type, ord),
+                    loc.site_id,
+                );
+            }
+        }
+
+        let mut remap = HashMap::new();
+        for loc in map_b.locations() {
+            if let Some(ord) = loc.ordinal {
+                let key = (loc.function.clone(), loc.event_type, ord);
+                if let Some(&a_site_id) = a_index.get(&key) {
+                    if a_site_id != loc.site_id {
+                        remap.insert(loc.site_id, a_site_id);
+                    }
+                }
+            }
+        }
+
+        SiteRemapper { remap }
+    }
+
+    /// Translate a site_id from trace B's address space to trace A's.
+    /// Returns the original site_id if no mapping exists.
+    pub fn translate(&self, site_id: u32) -> u32 {
+        self.remap.get(&site_id).copied().unwrap_or(site_id)
+    }
+
+    /// Number of site_ids that need remapping
+    pub fn num_remapped(&self) -> usize {
+        self.remap.len()
     }
 }
 
@@ -124,9 +183,58 @@ mod tests {
             line: 42,
             column: 10,
             event_type: 1,
+            ordinal: Some(0),
         };
 
         assert_eq!(loc.format(), "test.cu:my_kernel:42:10");
         assert_eq!(loc.format_short(), "test.cu:42");
+    }
+
+    #[test]
+    fn test_site_remapper() {
+        // Simulate two compilations of the same kernel with different site_ids
+        let json_a = r#"[
+  {"site_id": 100, "filename": "k.cu", "function": "kern", "line": 0, "column": 0, "event_type": 0, "ordinal": 0},
+  {"site_id": 200, "filename": "k.cu", "function": "kern", "line": 0, "column": 0, "event_type": 0, "ordinal": 1},
+  {"site_id": 300, "filename": "k.cu", "function": "kern", "line": 0, "column": 0, "event_type": 2, "ordinal": 0}
+]"#;
+        let json_b = r#"[
+  {"site_id": 999, "filename": "k.cu", "function": "kern", "line": 0, "column": 0, "event_type": 0, "ordinal": 0},
+  {"site_id": 888, "filename": "k.cu", "function": "kern", "line": 0, "column": 0, "event_type": 0, "ordinal": 1},
+  {"site_id": 777, "filename": "k.cu", "function": "kern", "line": 0, "column": 0, "event_type": 2, "ordinal": 0}
+]"#;
+
+        let mut file_a = NamedTempFile::new().unwrap();
+        file_a.write_all(json_a.as_bytes()).unwrap();
+        file_a.flush().unwrap();
+        let mut file_b = NamedTempFile::new().unwrap();
+        file_b.write_all(json_b.as_bytes()).unwrap();
+        file_b.flush().unwrap();
+
+        let map_a = SiteMap::load(file_a.path()).unwrap();
+        let map_b = SiteMap::load(file_b.path()).unwrap();
+        let remapper = SiteRemapper::build(&map_a, &map_b);
+
+        assert_eq!(remapper.num_remapped(), 3);
+        assert_eq!(remapper.translate(999), 100);
+        assert_eq!(remapper.translate(888), 200);
+        assert_eq!(remapper.translate(777), 300);
+        // Unknown site_id passes through unchanged
+        assert_eq!(remapper.translate(555), 555);
+    }
+
+    #[test]
+    fn test_backward_compat_no_ordinal() {
+        // JSON without ordinal field should still parse (defaults to None)
+        let json = r#"[
+  {"site_id": 42, "filename": "test.cu", "function": "kern", "line": 10, "column": 5, "event_type": 0}
+]"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(json.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let map = SiteMap::load(file.path()).unwrap();
+        let loc = map.get(42).unwrap();
+        assert_eq!(loc.ordinal, None);
     }
 }

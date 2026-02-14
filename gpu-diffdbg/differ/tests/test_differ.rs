@@ -26,7 +26,8 @@ fn create_test_trace(kernel_name: &str, events: &[Vec<TraceEvent>]) -> NamedTemp
         cuda_arch: 80,
         history_depth: 0,
         history_section_offset: 0,
-        _reserved: [0; 3],
+        sample_rate: 0,
+        _reserved: [0; 2],
     };
 
     // Copy kernel name
@@ -45,7 +46,7 @@ fn create_test_trace(kernel_name: &str, events: &[Vec<TraceEvent>]) -> NamedTemp
             write_idx: warp_events.len() as u32,
             overflow_count: 0,
             num_events: warp_events.len() as u32,
-            _reserved: 0,
+            total_event_count: 0,
         };
         let warp_header_bytes: &[u8] = bytemuck::bytes_of(&warp_header);
         file.write_all(warp_header_bytes).unwrap();

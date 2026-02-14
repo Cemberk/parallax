@@ -13,10 +13,10 @@ mod site_map;
 mod trace_format;
 mod tui;
 
-use differ::{diff_traces, DiffConfig};
-use parser::TraceFile;
+use differ::{diff_session, diff_traces, diff_traces_with_remap, DiffConfig};
+use parser::{SessionManifest, TraceFile};
 use report::{print_divergences, print_history_context, print_summary, print_trace_info};
-use site_map::SiteMap;
+use site_map::{SiteMap, SiteRemapper};
 
 #[derive(Parser, Debug)]
 #[command(name = "gddbg-diff")]
@@ -70,10 +70,27 @@ struct Args {
     /// Show value history context around divergences (time-travel)
     #[arg(long)]
     history: bool,
+
+    /// Site map for trace A (for cross-compilation remapping)
+    #[arg(long = "remap-a")]
+    remap_a: Option<PathBuf>,
+
+    /// Site map for trace B (for cross-compilation remapping)
+    #[arg(long = "remap-b")]
+    remap_b: Option<PathBuf>,
+
+    /// Treat TRACE_A and TRACE_B as session directories (multi-kernel pipeline diff)
+    #[arg(long)]
+    session: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Session mode: compare two session directories
+    if args.session {
+        return run_session_diff(&args);
+    }
 
     // Load trace files
     println!("Loading traces...");
@@ -113,6 +130,21 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Build site remapper if both remap maps provided
+    let remapper = if let (Some(remap_a_path), Some(remap_b_path)) =
+        (&args.remap_a, &args.remap_b)
+    {
+        let map_a = SiteMap::load(remap_a_path)
+            .with_context(|| format!("Failed to load remap-a: {}", remap_a_path.display()))?;
+        let map_b = SiteMap::load(remap_b_path)
+            .with_context(|| format!("Failed to load remap-b: {}", remap_b_path.display()))?;
+        let r = SiteRemapper::build(&map_a, &map_b);
+        println!("Site remapper: {} site_ids remapped\n", r.num_remapped());
+        Some(r)
+    } else {
+        None
+    };
+
     // Create diff configuration
     let config = DiffConfig {
         compare_values: args.values,
@@ -121,7 +153,7 @@ fn main() -> Result<()> {
     };
 
     // Perform differential analysis
-    let result = diff_traces(&trace_a, &trace_b, &config)?;
+    let result = diff_traces_with_remap(&trace_a, &trace_b, &config, remapper.as_ref())?;
 
     // TUI mode: launch interactive viewer
     if args.tui {
@@ -140,6 +172,55 @@ fn main() -> Result<()> {
 
     // Exit with non-zero if divergences found
     if !result.is_identical() {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Run session-mode diff: compare two session directories
+fn run_session_diff(args: &Args) -> Result<()> {
+    println!("Loading sessions...");
+    let session_a = SessionManifest::load(&args.trace_a)
+        .with_context(|| format!("Failed to load session A: {}", args.trace_a.display()))?;
+    let session_b = SessionManifest::load(&args.trace_b)
+        .with_context(|| format!("Failed to load session B: {}", args.trace_b.display()))?;
+
+    println!(
+        "Session A: {} launches, Session B: {} launches\n",
+        session_a.launches.len(),
+        session_b.launches.len()
+    );
+
+    let config = DiffConfig {
+        compare_values: args.values,
+        max_divergences: args.max_divergences,
+        lookahead_window: args.lookahead,
+    };
+
+    let session_result = diff_session(&session_a, &session_b, &config);
+
+    // Print per-kernel results
+    let mut any_diverged = false;
+    for (kernel_name, launch_idx, result) in &session_result.kernel_results {
+        println!("--- Kernel: {} (launch {}) ---", kernel_name, launch_idx);
+        match result {
+            Ok(diff_result) => {
+                print_summary(diff_result);
+                if !diff_result.is_identical() {
+                    any_diverged = true;
+                    print_divergences(diff_result, args.max_shown, None);
+                }
+            }
+            Err(e) => {
+                println!("  ERROR: {}", e);
+                any_diverged = true;
+            }
+        }
+        println!();
+    }
+
+    if any_diverged {
         std::process::exit(1);
     }
 

@@ -10,6 +10,22 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
 
+# Optional zstd compression
+option(GDDBG_ENABLE_COMPRESSION "Enable zstd trace compression" ON)
+if(GDDBG_ENABLE_COMPRESSION)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(ZSTD QUIET libzstd)
+    endif()
+    if(NOT ZSTD_FOUND)
+        find_library(ZSTD_LIBRARIES NAMES zstd)
+        find_path(ZSTD_INCLUDE_DIRS zstd.h)
+        if(ZSTD_LIBRARIES AND ZSTD_INCLUDE_DIRS)
+            set(ZSTD_FOUND TRUE)
+        endif()
+    endif()
+endif()
+
 # Runtime library sources
 set(RUNTIME_SOURCES
     gddbg_host.cu
@@ -33,7 +49,7 @@ target_link_libraries(gddbg_runtime PUBLIC
 # Set CUDA architecture and enable separable compilation
 # Do NOT resolve device symbols in the library - let the final executable do it
 set_target_properties(gddbg_runtime PROPERTIES
-    CUDA_ARCHITECTURES "80"
+    CUDA_ARCHITECTURES "${GDDBG_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS OFF
 )
@@ -51,11 +67,26 @@ target_link_libraries(gddbg_runtime_shared PUBLIC
 )
 
 set_target_properties(gddbg_runtime_shared PROPERTIES
-    CUDA_ARCHITECTURES "80"
+    CUDA_ARCHITECTURES "${GDDBG_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     OUTPUT_NAME "gddbg_runtime_shared"
 )
+
+# Link zstd to both static and shared targets when available
+if(GDDBG_ENABLE_COMPRESSION AND ZSTD_FOUND)
+    target_compile_definitions(gddbg_runtime PRIVATE GDDBG_HAS_ZSTD)
+    target_include_directories(gddbg_runtime PRIVATE ${ZSTD_INCLUDE_DIRS})
+    target_link_libraries(gddbg_runtime PRIVATE ${ZSTD_LIBRARIES})
+
+    target_compile_definitions(gddbg_runtime_shared PRIVATE GDDBG_HAS_ZSTD)
+    target_include_directories(gddbg_runtime_shared PRIVATE ${ZSTD_INCLUDE_DIRS})
+    target_link_libraries(gddbg_runtime_shared PRIVATE ${ZSTD_LIBRARIES})
+
+    message(STATUS "zstd compression enabled")
+else()
+    message(STATUS "zstd compression disabled (GDDBG_ENABLE_COMPRESSION=${GDDBG_ENABLE_COMPRESSION}, ZSTD_FOUND=${ZSTD_FOUND})")
+endif()
 
 # NVPTX bitcode for Triton integration (device-only runtime)
 # Compiled with the highest available clang to match Triton's LLVM IR format.
@@ -77,7 +108,7 @@ if(GDDBG_CLANG)
         OUTPUT ${GDDBG_RUNTIME_BC}
         COMMAND ${GDDBG_CLANG}
             --cuda-device-only
-            --cuda-gpu-arch=sm_80
+            --cuda-gpu-arch=sm_70
             -emit-llvm -c
             -fcuda-flush-denormals-to-zero
             -I${CMAKE_CURRENT_SOURCE_DIR}

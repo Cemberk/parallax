@@ -16,7 +16,7 @@ target_include_directories(manual_trace_test PRIVATE
 
 # Set CUDA architecture and enable device linking
 set_target_properties(manual_trace_test PROPERTIES
-    CUDA_ARCHITECTURES "80"
+    CUDA_ARCHITECTURES "${GDDBG_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
@@ -40,7 +40,7 @@ target_include_directories(divergence_test PRIVATE
 )
 
 set_target_properties(divergence_test PROPERTIES
-    CUDA_ARCHITECTURES "80"
+    CUDA_ARCHITECTURES "${GDDBG_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )

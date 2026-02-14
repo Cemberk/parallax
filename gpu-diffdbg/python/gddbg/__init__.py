@@ -6,6 +6,7 @@ Public API:
     integrate_with_triton()  - Alias for enable()
     read_trace(path)         - Read a .gddbg trace file
     diff_traces(a, b)        - Compare two trace files using the Rust differ
+    session(name)            - Context manager for multi-kernel pipeline tracing
 """
 
 __version__ = "0.1.0"
@@ -81,3 +82,21 @@ def diff_traces(trace_a: str, trace_b: str, **kwargs) -> int:
         cmd.append("--history")
 
     return subprocess.call(cmd)
+
+
+def session(name: str, **kwargs):
+    """
+    Context manager for session-based multi-kernel pipeline tracing.
+
+    Usage:
+        with gddbg.session("my_pipeline"):
+            # launch multiple kernels
+            pass
+        # session.json manifest is written to my_pipeline/
+
+    Args:
+        name: Session directory name.
+        **kwargs: Passed to GddbgRuntime constructor.
+    """
+    from .runtime import session as _session
+    return _session(name, **kwargs)

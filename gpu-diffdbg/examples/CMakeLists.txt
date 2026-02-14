@@ -13,7 +13,7 @@ target_include_directories(loop_divergence PRIVATE
 )
 
 set_target_properties(loop_divergence PROPERTIES
-    CUDA_ARCHITECTURES "80"
+    CUDA_ARCHITECTURES "${GDDBG_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
@@ -31,7 +31,7 @@ target_include_directories(occupancy_test PRIVATE
 )
 
 set_target_properties(occupancy_test PROPERTIES
-    CUDA_ARCHITECTURES "80"
+    CUDA_ARCHITECTURES "${GDDBG_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
@@ -49,7 +49,7 @@ target_include_directories(matmul_divergence PRIVATE
 )
 
 set_target_properties(matmul_divergence PROPERTIES
-    CUDA_ARCHITECTURES "80"
+    CUDA_ARCHITECTURES "${GDDBG_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
@@ -67,7 +67,7 @@ target_include_directories(instrumented_divergence PRIVATE
 )
 
 set_target_properties(instrumented_divergence PROPERTIES
-    CUDA_ARCHITECTURES "80"
+    CUDA_ARCHITECTURES "${GDDBG_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )

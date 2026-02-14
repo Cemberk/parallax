@@ -20,6 +20,7 @@ extern "C" {
 #define GDDBG_FLAG_COMPACT  0x1   // Bit 0: compact event format
 #define GDDBG_FLAG_COMPRESS 0x2   // Bit 1: zstd compressed
 #define GDDBG_FLAG_HISTORY  0x4   // Bit 2: history ring section appended
+#define GDDBG_FLAG_SAMPLED  0x8   // Bit 3: sampling was active (sample_rate > 1)
 
 // History (time-travel) defaults
 #define GDDBG_HISTORY_DEPTH_DEFAULT 64
@@ -59,7 +60,7 @@ typedef struct {
     uint32_t write_idx;         // Current write position (atomic)
     uint32_t overflow_count;    // Number of dropped events
     uint32_t num_events;        // Actual events written (set during copy-back)
-    uint32_t _reserved;
+    uint32_t total_event_count; // Total events seen (including sampled-out), for sampling diagnostics
 } WarpBufferHeader;
 
 // File header (160 bytes - must be multiple of 16 for alignment)
@@ -83,14 +84,15 @@ typedef struct {
     uint64_t timestamp;
     uint32_t cuda_arch;         // e.g., 80 for SM_80
 
-    // History / reserved fields (20 bytes to reach 160 total)
+    // History / sampling / reserved fields (20 bytes to reach 160 total)
     // When GDDBG_FLAG_HISTORY is set:
     //   history_depth: entries per warp in the history ring buffer
     //   history_section_offset: byte offset from file start to history data
     //     (0 = immediately after warp event buffers)
     uint32_t history_depth;             // [0] History entries per warp (0 = no history)
     uint32_t history_section_offset;    // [1] Byte offset to history section (0 = auto)
-    uint32_t _reserved[3];             // [2-4] Padding to make 160 bytes
+    uint32_t sample_rate;              // [2] Sampling rate (1 = record all, N = record 1/N)
+    uint32_t _reserved[2];            // [3-4] Padding to make 160 bytes
 } TraceFileHeader;
 
 // ---- History (Time-Travel) Structures ----

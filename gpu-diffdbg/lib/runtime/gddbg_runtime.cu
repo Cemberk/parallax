@@ -14,6 +14,9 @@ __device__ volatile int __gddbg_recording_enabled = 1;
 __device__ char* g_gddbg_history_buffer = nullptr;
 __device__ uint32_t g_gddbg_history_depth = 0;
 
+// Sampling rate: 1 = record all (default), N = record 1 out of every N events per warp
+__device__ uint32_t __gddbg_sample_rate = 1;
+
 // Compute linear warp ID within the grid
 __device__ __forceinline__ uint32_t __gddbg_warp_id() {
     // Thread ID within block
@@ -87,6 +90,11 @@ extern "C" __device__ void __gddbg_record_branch(
     WarpBufferHeader* header = (WarpBufferHeader*)warp_base;
     TraceEvent* events = (TraceEvent*)(warp_base + sizeof(WarpBufferHeader));
 
+    // Sampling: count all events, but only record 1/N (plain write is safe — only lane 0 touches this)
+    uint32_t evt_count = header->total_event_count;
+    header->total_event_count = evt_count + 1;
+    if (__gddbg_sample_rate > 1 && (evt_count % __gddbg_sample_rate) != 0) return;
+
     // Atomically increment write index
     uint32_t idx = atomicAdd(&header->write_idx, 1);
 
@@ -133,6 +141,11 @@ extern "C" __device__ void __gddbg_record_shmem_store(
     WarpBufferHeader* header = (WarpBufferHeader*)warp_base;
     TraceEvent* events = (TraceEvent*)(warp_base + sizeof(WarpBufferHeader));
 
+    // Sampling
+    uint32_t evt_count = header->total_event_count;
+    header->total_event_count = evt_count + 1;
+    if (__gddbg_sample_rate > 1 && (evt_count % __gddbg_sample_rate) != 0) return;
+
     uint32_t idx = atomicAdd(&header->write_idx, 1);
     if (idx >= GDDBG_EVENTS_PER_WARP) {
         atomicAdd(&header->overflow_count, 1);
@@ -171,6 +184,11 @@ extern "C" __device__ void __gddbg_record_atomic(
     WarpBufferHeader* header = (WarpBufferHeader*)warp_base;
     TraceEvent* events = (TraceEvent*)(warp_base + sizeof(WarpBufferHeader));
 
+    // Sampling
+    uint32_t evt_count = header->total_event_count;
+    header->total_event_count = evt_count + 1;
+    if (__gddbg_sample_rate > 1 && (evt_count % __gddbg_sample_rate) != 0) return;
+
     uint32_t idx = atomicAdd(&header->write_idx, 1);
     if (idx >= GDDBG_EVENTS_PER_WARP) {
         atomicAdd(&header->overflow_count, 1);
@@ -207,6 +225,11 @@ extern "C" __device__ void __gddbg_record_func(
     char* warp_base = ((char*)buf) + sizeof(TraceFileHeader) + warp * warp_buffer_size;
     WarpBufferHeader* header = (WarpBufferHeader*)warp_base;
     TraceEvent* events = (TraceEvent*)(warp_base + sizeof(WarpBufferHeader));
+
+    // Sampling
+    uint32_t evt_count = header->total_event_count;
+    header->total_event_count = evt_count + 1;
+    if (__gddbg_sample_rate > 1 && (evt_count % __gddbg_sample_rate) != 0) return;
 
     uint32_t idx = atomicAdd(&header->write_idx, 1);
     if (idx >= GDDBG_EVENTS_PER_WARP) {

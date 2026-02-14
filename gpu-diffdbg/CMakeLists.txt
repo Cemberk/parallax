@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
+# Configurable CUDA architectures (SM_70=Volta/V100, SM_80=Ampere/A100, SM_90=Hopper/H100)
+set(GDDBG_CUDA_ARCHITECTURES "70;80;90" CACHE STRING "CUDA architectures to build for")
+
 # Export compile commands for editor integration
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

@@ -14,7 +14,9 @@ from typing import List, Optional, Sequence
 # Constants (must match trace_format.h)
 GDDBG_MAGIC = 0x4744444247504400
 GDDBG_VERSION = 1
+GDDBG_FLAG_COMPRESS = 0x2
 GDDBG_FLAG_HISTORY = 0x4
+GDDBG_FLAG_SAMPLED = 0x8
 
 # Struct sizes (must match C layout)
 HEADER_SIZE = 160
@@ -103,10 +105,15 @@ class TraceHeader:
     cuda_arch: int
     history_depth: int
     history_section_offset: int
+    sample_rate: int = 1
 
     @property
     def has_history(self) -> bool:
         return bool(self.flags & GDDBG_FLAG_HISTORY) and self.history_depth > 0
+
+    @property
+    def is_sampled(self) -> bool:
+        return bool(self.flags & GDDBG_FLAG_SAMPLED) and self.sample_rate > 1
 
     @property
     def total_blocks(self) -> int:
@@ -170,7 +177,7 @@ class TraceData:
 
 def read_trace(path: str) -> TraceData:
     """
-    Read a .gddbg trace file.
+    Read a .gddbg trace file (handles zstd-compressed files transparently).
 
     Args:
         path: Path to the trace file.
@@ -189,9 +196,37 @@ def read_trace(path: str) -> TraceData:
     with open(path, "rb") as f:
         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         try:
+            # Check for compression: parse flags from header
+            if len(mm) >= HEADER_SIZE:
+                flags = struct.unpack_from("<I", mm, 12)[0]  # flags at offset 12
+                if flags & GDDBG_FLAG_COMPRESS:
+                    return _read_compressed(mm)
             return _parse_trace(mm)
         finally:
             mm.close()
+
+
+def _read_compressed(mm) -> TraceData:
+    """Decompress a zstd-compressed trace and parse it."""
+    try:
+        import zstandard as zstd
+    except ImportError:
+        raise ImportError(
+            "zstandard package required for compressed traces. "
+            "Install with: pip install zstandard"
+        )
+
+    # Header is uncompressed (first 160 bytes)
+    header_bytes = bytes(mm[:HEADER_SIZE])
+    compressed_payload = bytes(mm[HEADER_SIZE:])
+
+    # Decompress payload
+    dctx = zstd.ZstdDecompressor()
+    decompressed = dctx.decompress(compressed_payload)
+
+    # Combine header + decompressed payload
+    full_data = header_bytes + decompressed
+    return _parse_trace(full_data)
 
 
 def _parse_header(data: bytes) -> TraceHeader:
@@ -216,6 +251,7 @@ def _parse_header(data: bytes) -> TraceHeader:
     cuda_arch = values[15]
     history_depth = values[16]
     history_section_offset = values[17]
+    sample_rate = values[18]  # 0 or 1 = record all, N = record 1/N
 
     # Validate
     if magic != GDDBG_MAGIC:
@@ -243,6 +279,7 @@ def _parse_header(data: bytes) -> TraceHeader:
         cuda_arch=cuda_arch,
         history_depth=history_depth,
         history_section_offset=history_section_offset,
+        sample_rate=max(sample_rate, 1),
     )
 
 

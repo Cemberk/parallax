@@ -52,27 +52,33 @@ uint32_t SiteTable::fnv1a_hash(const std::string& str) {
 uint32_t SiteTable::getSiteId(const llvm::Instruction* I, uint8_t event_type) {
     SourceLocation loc = getSourceLocation(I);
 
-    // Create deterministic hash of source location
-    // Format: filename:function:line:column:event_type
-    std::ostringstream oss;
-    oss << loc.filename << ":" << loc.function_name << ":"
-        << loc.line << ":" << loc.column << ":" << (int)event_type;
+    // Compute per-(function, event_type) ordinal for cross-compilation stability.
+    // This ensures that even without debug info, the Nth branch in function F
+    // always gets the same ordinal regardless of optimization level or
+    // recompilation, as long as the source code hasn't changed.
+    std::string ordinal_key = loc.function_name + ":" + std::to_string(event_type);
+    uint32_t ordinal = ordinal_counters_[ordinal_key]++;
 
-    // When debug info is absent (line=0, col=0), multiple instructions
-    // collapse to the same hash key. Use a monotonic counter to
-    // disambiguate, appending the instruction's ordinal position.
+    // Create deterministic hash of source location
+    std::ostringstream oss;
     if (loc.line == 0 && loc.column == 0) {
-        oss << ":seq" << next_seq_++;
+        // No debug info: use function:event_type:ordinal for stability
+        oss << loc.function_name << ":" << (int)event_type << ":ord" << ordinal;
+    } else {
+        // With debug info: use full source location
+        oss << loc.filename << ":" << loc.function_name << ":"
+            << loc.line << ":" << loc.column << ":" << (int)event_type;
     }
 
     std::string location_str = oss.str();
     uint32_t site_id = fnv1a_hash(location_str);
 
-    // Record new site (each call produces a unique site when no debug info)
+    // Record new site
     SiteInfo info;
     info.site_id = site_id;
     info.location = loc;
     info.event_type = event_type;
+    info.ordinal = ordinal;
 
     size_t idx = sites_.size();
     sites_.push_back(info);
@@ -124,7 +130,8 @@ bool SiteTable::exportToJSON(const std::string& filename) const {
         OS << "    \"function\": \"" << escapeJSON(site.location.function_name) << "\",\n";
         OS << "    \"line\": " << site.location.line << ",\n";
         OS << "    \"column\": " << site.location.column << ",\n";
-        OS << "    \"event_type\": " << (int)site.event_type << "\n";
+        OS << "    \"event_type\": " << (int)site.event_type << ",\n";
+        OS << "    \"ordinal\": " << site.ordinal << "\n";
         OS << "  }";
         if (i < sites_.size() - 1) {
             OS << ",";

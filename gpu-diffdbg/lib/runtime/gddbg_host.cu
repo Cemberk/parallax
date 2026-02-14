@@ -5,6 +5,10 @@
 #include <cstdio>
 #include <ctime>
 
+#ifdef GDDBG_HAS_ZSTD
+#include <zstd.h>
+#endif
+
 // Global state
 static void* d_trace_buffer = nullptr;
 static size_t trace_buffer_size = 0;
@@ -17,6 +21,24 @@ static bool enabled = true;
 
 // Configuration from environment variables
 static uint32_t events_per_warp = GDDBG_EVENTS_PER_WARP;
+static uint32_t sample_rate = 1;
+static bool compress_enabled = false;
+
+// Session state
+static bool session_active = false;
+static char session_dir[256] = "";
+static uint32_t session_launch_count = 0;
+
+#define GDDBG_MAX_SESSION_ENTRIES 256
+struct SessionEntry {
+    char kernel_name[64];
+    char filename[256];
+    uint32_t launch_idx;
+    uint32_t grid_dim[3];
+    uint32_t block_dim[3];
+};
+static SessionEntry session_entries[GDDBG_MAX_SESSION_ENTRIES];
+static uint32_t session_entry_count = 0;
 
 // FNV-1a hash for kernel name (64-bit)
 static uint64_t fnv1a_hash(const char* str) {
@@ -53,6 +75,17 @@ extern "C" void gddbg_init(void) {
     } else {
         history_depth = GDDBG_HISTORY_DEPTH_DEFAULT;
     }
+
+    const char* sample_rate_str = getenv("GDDBG_SAMPLE_RATE");
+    if (sample_rate_str) {
+        sample_rate = atoi(sample_rate_str);
+        if (sample_rate < 1) sample_rate = 1;
+    }
+
+#ifdef GDDBG_HAS_ZSTD
+    const char* compress_str = getenv("GDDBG_COMPRESS");
+    compress_enabled = compress_str && atoi(compress_str) != 0;
+#endif
 
     initialized = true;
 
@@ -95,8 +128,10 @@ extern "C" void gddbg_pre_launch(const char* kernel_name, dim3 gridDim, dim3 blo
     header.magic = GDDBG_MAGIC;
     header.version = GDDBG_VERSION;
     header.flags = (history_depth > 0) ? GDDBG_FLAG_HISTORY : 0;
+    if (sample_rate > 1) header.flags |= GDDBG_FLAG_SAMPLED;
     header.history_depth = history_depth;
     header.history_section_offset = 0;  // 0 = immediately after event buffers
+    header.sample_rate = sample_rate;
     header.kernel_name_hash = fnv1a_hash(kernel_name);
     strncpy(header.kernel_name, kernel_name, sizeof(header.kernel_name) - 1);
     header.grid_dim[0] = gridDim.x;
@@ -131,6 +166,13 @@ extern "C" void gddbg_pre_launch(const char* kernel_name, dim3 gridDim, dim3 blo
         d_trace_buffer = nullptr;
         enabled = false;
         return;
+    }
+
+    // Set sampling rate on device
+    cudaMemcpyToSymbol(__gddbg_sample_rate, &sample_rate, sizeof(uint32_t));
+    if (sample_rate > 1) {
+        fprintf(stderr, "[gddbg] Sampling rate: 1/%u (recording ~%.1f%% of events)\n",
+                sample_rate, 100.0f / sample_rate);
     }
 
     // Allocate history ring buffer if enabled
@@ -239,38 +281,111 @@ extern "C" void gddbg_post_launch(void) {
         }
     }
 
+    // Determine output path (session mode or single-file mode)
+    char effective_path[512];
+    if (session_active && session_entry_count < GDDBG_MAX_SESSION_ENTRIES) {
+        // Session mode: write to session_dir/kernel_N.gddbg
+        snprintf(effective_path, sizeof(effective_path), "%s/%s_%u.gddbg",
+                 session_dir, header->kernel_name, session_launch_count);
+
+        // Record session entry
+        SessionEntry& entry = session_entries[session_entry_count];
+        strncpy(entry.kernel_name, header->kernel_name, sizeof(entry.kernel_name) - 1);
+        strncpy(entry.filename, effective_path, sizeof(entry.filename) - 1);
+        entry.launch_idx = session_launch_count;
+        memcpy(entry.grid_dim, header->grid_dim, sizeof(entry.grid_dim));
+        memcpy(entry.block_dim, header->block_dim, sizeof(entry.block_dim));
+        session_entry_count++;
+        session_launch_count++;
+    } else {
+        strncpy(effective_path, output_path, sizeof(effective_path) - 1);
+        effective_path[sizeof(effective_path) - 1] = '\0';
+    }
+
+    // Build contiguous payload (everything after header) for potential compression
+    size_t payload_size = trace_buffer_size - sizeof(TraceFileHeader);
+    if (h_history) payload_size += history_buffer_size;
+
     // Write to file
-    FILE* f = fopen(output_path, "wb");
+    FILE* f = fopen(effective_path, "wb");
     if (!f) {
-        fprintf(stderr, "[gddbg] ERROR: cannot open output file: %s\n", output_path);
+        fprintf(stderr, "[gddbg] ERROR: cannot open output file: %s\n", effective_path);
         free(h_buffer);
         if (h_history) free(h_history);
         return;
     }
 
-    // Write main trace data
-    size_t written = fwrite(h_buffer, 1, trace_buffer_size, f);
-    size_t total_written = written;
+    size_t total_written = 0;
 
-    // Append history section
-    if (h_history && written == trace_buffer_size) {
-        size_t hist_written = fwrite(h_history, 1, history_buffer_size, f);
-        total_written += hist_written;
-        if (hist_written != history_buffer_size) {
-            fprintf(stderr, "[gddbg] WARNING: incomplete history write (%zu of %zu bytes)\n",
-                    hist_written, history_buffer_size);
+#ifdef GDDBG_HAS_ZSTD
+    if (compress_enabled && payload_size > 0) {
+        // Set compress flag in header
+        header->flags |= GDDBG_FLAG_COMPRESS;
+
+        // Write header (uncompressed, 160 bytes)
+        fwrite(header, 1, sizeof(TraceFileHeader), f);
+        total_written += sizeof(TraceFileHeader);
+
+        // Build contiguous payload buffer
+        void* payload = malloc(payload_size);
+        if (payload) {
+            size_t off = 0;
+            size_t warp_data_size = trace_buffer_size - sizeof(TraceFileHeader);
+            memcpy((char*)payload + off, (char*)h_buffer + sizeof(TraceFileHeader), warp_data_size);
+            off += warp_data_size;
+            if (h_history) {
+                memcpy((char*)payload + off, h_history, history_buffer_size);
+            }
+
+            // Compress
+            size_t comp_bound = ZSTD_compressBound(payload_size);
+            void* comp_buf = malloc(comp_bound);
+            if (comp_buf) {
+                size_t comp_size = ZSTD_compress(comp_buf, comp_bound, payload, payload_size, 3);
+                if (!ZSTD_isError(comp_size)) {
+                    fwrite(comp_buf, 1, comp_size, f);
+                    total_written += comp_size;
+                    fprintf(stderr, "[gddbg] Compressed: %zu -> %zu bytes (%.1fx)\n",
+                            payload_size, comp_size, (double)payload_size / comp_size);
+                } else {
+                    fprintf(stderr, "[gddbg] WARNING: zstd compression failed: %s, writing uncompressed\n",
+                            ZSTD_getErrorName(comp_size));
+                    header->flags &= ~GDDBG_FLAG_COMPRESS;
+                    // Rewrite header without compress flag, then payload
+                    fseek(f, 0, SEEK_SET);
+                    fwrite(header, 1, sizeof(TraceFileHeader), f);
+                    fwrite(payload, 1, payload_size, f);
+                    total_written = sizeof(TraceFileHeader) + payload_size;
+                }
+                free(comp_buf);
+            }
+            free(payload);
+        }
+    } else
+#endif
+    {
+        // Uncompressed path
+        size_t written = fwrite(h_buffer, 1, trace_buffer_size, f);
+        total_written = written;
+
+        if (h_history && written == trace_buffer_size) {
+            size_t hist_written = fwrite(h_history, 1, history_buffer_size, f);
+            total_written += hist_written;
+            if (hist_written != history_buffer_size) {
+                fprintf(stderr, "[gddbg] WARNING: incomplete history write (%zu of %zu bytes)\n",
+                        hist_written, history_buffer_size);
+            }
+        }
+
+        if (written != trace_buffer_size) {
+            fprintf(stderr, "[gddbg] ERROR: incomplete write (%zu of %zu bytes)\n",
+                    written, trace_buffer_size);
         }
     }
 
     fclose(f);
-
-    if (written != trace_buffer_size) {
-        fprintf(stderr, "[gddbg] ERROR: incomplete write (%zu of %zu bytes)\n",
-                written, trace_buffer_size);
-    } else {
-        fprintf(stderr, "[gddbg] Trace written to: %s (%zu MB)\n",
-                output_path, total_written / (1024*1024));
-    }
+    fprintf(stderr, "[gddbg] Trace written to: %s (%zu KB)\n",
+            effective_path, total_written / 1024);
 
     free(h_buffer);
     if (h_history) free(h_history);
@@ -294,6 +409,57 @@ extern "C" void gddbg_post_launch(void) {
     // Clear the global device pointer
     void* null_ptr = nullptr;
     cudaMemcpyToSymbol(g_gddbg_buffer, &null_ptr, sizeof(void*));
+}
+
+// Session API: begin capturing multiple kernel launches
+extern "C" void gddbg_session_begin(const char* name) {
+    if (!initialized) gddbg_init();
+
+    snprintf(session_dir, sizeof(session_dir), "%s", name);
+
+    // Create session directory (best-effort, may already exist)
+    char mkdir_cmd[512];
+    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", session_dir);
+    system(mkdir_cmd);
+
+    session_active = true;
+    session_launch_count = 0;
+    session_entry_count = 0;
+    fprintf(stderr, "[gddbg] Session started: %s\n", session_dir);
+}
+
+// Session API: end session and write manifest
+extern "C" void gddbg_session_end(void) {
+    if (!session_active) return;
+
+    // Write session.json manifest
+    char manifest_path[512];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/session.json", session_dir);
+
+    FILE* f = fopen(manifest_path, "w");
+    if (f) {
+        fprintf(f, "[\n");
+        for (uint32_t i = 0; i < session_entry_count; i++) {
+            const SessionEntry& e = session_entries[i];
+            fprintf(f, "  {\n");
+            fprintf(f, "    \"launch\": %u,\n", e.launch_idx);
+            fprintf(f, "    \"kernel\": \"%s\",\n", e.kernel_name);
+            fprintf(f, "    \"file\": \"%s\",\n", e.filename);
+            fprintf(f, "    \"grid\": [%u, %u, %u],\n", e.grid_dim[0], e.grid_dim[1], e.grid_dim[2]);
+            fprintf(f, "    \"block\": [%u, %u, %u]\n", e.block_dim[0], e.block_dim[1], e.block_dim[2]);
+            fprintf(f, "  }%s\n", (i < session_entry_count - 1) ? "," : "");
+        }
+        fprintf(f, "]\n");
+        fclose(f);
+        fprintf(stderr, "[gddbg] Session manifest written: %s (%u launches)\n",
+                manifest_path, session_entry_count);
+    } else {
+        fprintf(stderr, "[gddbg] ERROR: cannot write session manifest: %s\n", manifest_path);
+    }
+
+    session_active = false;
+    session_launch_count = 0;
+    session_entry_count = 0;
 }
 
 // Cleanup
