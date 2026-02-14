@@ -19,8 +19,8 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-triton = ["triton>=2.0"]
-all = ["triton>=2.0"]
+triton = ["triton>=3.0"]
+all = ["triton>=3.0"]
 
 [project.scripts]
 prlx = "prlx.cli:main"

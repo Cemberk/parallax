@@ -6,6 +6,8 @@ LLVM instrumentation pass. Works by intercepting the LLVM IR between
 Triton's make_llir() and make_ptx() stages, linking the device-side
 runtime bitcode, and running the instrumentation pass via opt.
 
+Requires Triton >= 3.0 (uses the official knobs.runtime stages API).
+
 Usage:
     import prlx
     prlx.enable()
@@ -108,7 +110,7 @@ def _instrument_llvm_ir(llvm_ir: str) -> str:
     """
     Instrument LLVM IR by linking runtime bitcode and running the pass.
 
-    Pipeline: input.ll → llvm-link with runtime BC → opt with pass → output.ll
+    Pipeline: input.ll -> llvm-link with runtime BC -> opt with pass -> output.ll
 
     The runtime bitcode is compiled with -fcuda-flush-denormals-to-zero so its
     nvvm-reflect-ftz flag (=1) matches Triton's. Data layout differences between
@@ -178,30 +180,8 @@ def _hook_triton_stages(verbose: bool):
     """
     Hook into Triton's compilation stages to intercept LLVM IR.
 
-    Uses Triton 3.x's add_stages_inspection_hook API to wrap the 'llir'
-    stage. Falls back to monkey-patching CUDABackend.make_llir if the
-    hook API is not available.
+    Uses Triton 3.x's knobs.runtime.add_stages_inspection_hook API.
     """
-    hooked = False
-
-    # Try the official stages hook API first (Triton >= 3.x)
-    try:
-        from triton import knobs
-        if hasattr(knobs, "runtime") and hasattr(
-            knobs.runtime, "add_stages_inspection_hook"
-        ):
-            _hook_via_stages_api(verbose)
-            hooked = True
-    except ImportError:
-        pass
-
-    if not hooked:
-        # Try monkey-patching CUDABackend.make_llir
-        _hook_via_monkey_patch(verbose)
-
-
-def _hook_via_stages_api(verbose: bool):
-    """Hook using Triton's official stages inspection API."""
     from triton import knobs
 
     def prlx_stages_hook(backend, stages, options, language, capability):
@@ -229,54 +209,6 @@ def _hook_via_stages_api(verbose: bool):
         )
 
 
-def _hook_via_monkey_patch(verbose: bool):
-    """Fallback: monkey-patch CUDABackend.make_llir directly."""
-    try:
-        from triton.backends.nvidia.compiler import CUDABackend
-    except ImportError:
-        if verbose:
-            print(
-                "[prlx] Cannot find CUDABackend. "
-                "Setting LLVM_PASS_PLUGINS as fallback.",
-                file=sys.stderr,
-            )
-        _set_llvm_env_var()
-        return
-
-    original_make_llir = CUDABackend.make_llir
-
-    def patched_make_llir(self, src, metadata, options, capability):
-        llvm_ir = original_make_llir(self, src, metadata, options, capability)
-
-        if os.environ.get("PRLX_ENABLED", "1") == "0":
-            return llvm_ir
-
-        return _instrument_llvm_ir(llvm_ir)
-
-    CUDABackend.make_llir = patched_make_llir
-
-    if verbose:
-        print(
-            "[prlx] Monkey-patched CUDABackend.make_llir",
-            file=sys.stderr,
-        )
-
-
-def _set_llvm_env_var():
-    """Last resort: set LLVM_PASS_PLUGINS env var."""
-    if _pass_plugin:
-        existing = os.environ.get("LLVM_PASS_PLUGINS", "")
-        if str(_pass_plugin) not in existing:
-            os.environ["LLVM_PASS_PLUGINS"] = (
-                f"{existing};{_pass_plugin}" if existing else str(_pass_plugin)
-            )
-        print(
-            "[prlx] Set LLVM_PASS_PLUGINS (fallback, may not work with "
-            "Triton's bundled LLVM)",
-            file=sys.stderr,
-        )
-
-
 def _wrap_triton_launch(verbose: bool):
     """
     Wrap Triton's JIT kernel launch to insert pre/post trace hooks.
@@ -286,20 +218,12 @@ def _wrap_triton_launch(verbose: bool):
     """
     global _original_launch
 
-    try:
-        from triton.runtime import JITFunction
-    except ImportError:
-        if verbose:
-            print(
-                "[prlx] Triton not installed. Launch wrapper skipped.",
-                file=sys.stderr,
-            )
-        return
+    from triton.runtime import JITFunction
 
     if _original_launch is not None:
         return
 
-    # Try to load the runtime library
+    # Load the runtime library
     rt_lib = find_runtime_library()
     if rt_lib is None:
         if verbose:
@@ -310,13 +234,8 @@ def _wrap_triton_launch(verbose: bool):
             )
         return
 
-    try:
-        from .runtime import PrlxRuntime
-        runtime = PrlxRuntime(str(rt_lib))
-    except Exception as e:
-        if verbose:
-            print(f"[prlx] Could not load runtime: {e}", file=sys.stderr)
-        return
+    from .runtime import PrlxRuntime
+    runtime = PrlxRuntime(str(rt_lib))
 
     _original_launch = JITFunction.run
 
@@ -336,17 +255,9 @@ def _wrap_triton_launch(verbose: bool):
         block_dim = (kwargs.get("num_warps", 4) * 32, 1, 1)
         kernel_name = getattr(self, "__name__", "triton_kernel")
 
-        try:
-            runtime.pre_launch(kernel_name, grid_dim, block_dim)
-        except Exception as e:
-            print(f"[prlx] pre_launch failed: {e}", file=sys.stderr)
-
+        runtime.pre_launch(kernel_name, grid_dim, block_dim)
         result = _original_launch(self, *args, **kwargs)
-
-        try:
-            runtime.post_launch()
-        except Exception as e:
-            print(f"[prlx] post_launch failed: {e}", file=sys.stderr)
+        runtime.post_launch()
 
         return result
 
@@ -361,29 +272,12 @@ def uninstall():
 
     # Restore kernel launch
     if _original_launch is not None:
-        try:
-            from triton.runtime import JITFunction
-            JITFunction.run = _original_launch
-        except ImportError:
-            pass
+        from triton.runtime import JITFunction
+        JITFunction.run = _original_launch
         _original_launch = None
 
     # Remove stages hook
-    try:
-        from triton import knobs
-        if hasattr(knobs, "runtime"):
-            knobs.runtime.add_stages_inspection_hook = None
-    except ImportError:
-        pass
-
-    # Clean up env var
-    plugins = os.environ.get("LLVM_PASS_PLUGINS", "")
-    plugin = find_pass_plugin()
-    if plugin and str(plugin) in plugins:
-        parts = [p for p in plugins.split(";") if p and str(plugin) not in p]
-        if parts:
-            os.environ["LLVM_PASS_PLUGINS"] = ";".join(parts)
-        else:
-            os.environ.pop("LLVM_PASS_PLUGINS", None)
+    from triton import knobs
+    knobs.runtime.add_stages_inspection_hook = None
 
     _installed = False

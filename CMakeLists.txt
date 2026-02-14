@@ -7,7 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Configurable CUDA architectures (SM_70=Volta/V100, SM_80=Ampere/A100, SM_90=Hopper/H100)
+# Configurable CUDA architectures
+# SM_70=Volta/V100, SM_80=Ampere/A100, SM_90=Hopper/H100, SM_120=Blackwell/50xx
 set(PRLX_CUDA_ARCHITECTURES "70;80;90" CACHE STRING "CUDA architectures to build for")
 
 # Export compile commands for editor integration
@@ -38,7 +39,7 @@ endif()
 # Find LLVM (for the pass)
 # Prefer LLVM 20 (closest to Triton's bundled LLVM 22), then 18 as fallback
 set(BUILD_LLVM_PASS OFF)
-foreach(_LLVM_VER 20 18)
+foreach(_LLVM_VER 20 19 18)
     if(NOT BUILD_LLVM_PASS)
         # Don't pass version to find_package — LLVM's cmake version compatibility
         # checks are too strict. We verify the major version ourselves.
@@ -58,7 +59,7 @@ foreach(_LLVM_VER 20 18)
 endforeach()
 
 if(NOT BUILD_LLVM_PASS)
-    message(WARNING "LLVM 20 or 18 not found. LLVM pass will not be built.")
+    message(WARNING "LLVM 18, 19, or 20 not found. LLVM pass will not be built.")
     message(WARNING "Runtime and tests will still be built.")
 endif()
 

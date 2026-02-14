@@ -24,7 +24,7 @@ Site: 0xfbe6edc1 (2 warps affected)
 pip install prlx
 ```
 
-**Requirements:** CUDA Toolkit 12.0+ and LLVM 20 (or 18) on your system.
+**Requirements:** CUDA Toolkit 12.0+ and LLVM 18, 19, or 20 on your system.
 
 <details>
 <summary>Building from source</summary>
@@ -38,7 +38,7 @@ cd differ && cargo build --release && cd ..
 pip install -e .
 ```
 
-Requires: CMake 3.20+, LLVM/Clang 20 (or 18), CUDA Toolkit, Rust (stable).
+Requires: CMake 3.20+, LLVM/Clang 18-20, CUDA Toolkit 12.0+, Rust (stable).
 </details>
 
 ## Quick Start
@@ -108,7 +108,7 @@ examples/          Demo kernels
 | Dependency | Needed For | Install |
 |---|---|---|
 | CUDA Toolkit 12.0+ | Kernel compilation + tracing | `apt install nvidia-cuda-toolkit` or [NVIDIA](https://developer.nvidia.com/cuda-downloads) |
-| LLVM 20 (or 18) | `prlx compile` and Triton hook | `apt install llvm-20` or via [apt.llvm.org](https://apt.llvm.org) |
+| LLVM 18, 19, or 20 | `prlx compile` and Triton hook | `apt install llvm-20` or via [apt.llvm.org](https://apt.llvm.org) |
 
 The `prlx-diff` differ and Python API work without any external dependencies.
 
