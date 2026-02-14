@@ -1,4 +1,4 @@
-//! Interactive TUI viewer for gpu-diffdbg trace comparison.
+//! Interactive TUI viewer for prlx trace comparison.
 //!
 //! Provides a split-pane vimdiff-like interface for navigating divergences
 //! between two CUDA execution traces.

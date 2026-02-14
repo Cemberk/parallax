@@ -1,4 +1,4 @@
-# NVBit binary instrumentation backend for gpu-diffdbg
+# NVBit binary instrumentation backend for prlx
 #
 # This builds libprlx_nvbit.so, a shared library loaded via LD_PRELOAD
 # that instruments SASS instructions at runtime using NVBit.

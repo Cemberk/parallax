@@ -35,9 +35,9 @@ def _project_root() -> Optional[Path]:
 def _detect_llvm_version() -> Optional[int]:
     """Detect the major LLVM version available on the system.
 
-    Checks opt-20, opt-18, opt in order and parses --version output.
+    Checks opt-20, opt-19, opt-18, opt in order and parses --version output.
     """
-    for name in ("opt-20", "opt-18", "opt"):
+    for name in ("opt-20", "opt-19", "opt-18", "opt"):
         path = shutil.which(name)
         if path:
             try:
@@ -49,8 +49,8 @@ def _detect_llvm_version() -> Optional[int]:
                     m = re.search(r"(\d+)\.\d+", line)
                     if m:
                         return int(m.group(1))
-            except Exception:
-                pass
+            except (subprocess.SubprocessError, OSError):
+                continue
     return None
 
 
@@ -195,11 +195,8 @@ def find_include_dirs() -> List[Path]:
 
 
 def find_opt_binary() -> Optional[Path]:
-    """Find opt (LLVM optimizer) for running the instrumentation pass.
-
-    Prefers LLVM 20 (closest to Triton's bundled LLVM), falls back to 18.
-    """
-    for name in ("opt-20", "opt-18", "opt"):
+    """Find opt (LLVM optimizer) for running the instrumentation pass."""
+    for name in ("opt-20", "opt-19", "opt-18", "opt"):
         path = shutil.which(name)
         if path:
             return Path(path)
@@ -207,11 +204,8 @@ def find_opt_binary() -> Optional[Path]:
 
 
 def find_llvm_link_binary() -> Optional[Path]:
-    """Find llvm-link for linking NVPTX bitcode modules.
-
-    Prefers LLVM 20, falls back to 18.
-    """
-    for name in ("llvm-link-20", "llvm-link-18", "llvm-link"):
+    """Find llvm-link for linking NVPTX bitcode modules."""
+    for name in ("llvm-link-20", "llvm-link-19", "llvm-link-18", "llvm-link"):
         path = shutil.which(name)
         if path:
             return Path(path)

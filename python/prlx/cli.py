@@ -40,7 +40,7 @@ PRLX — GPU Differential Debugger
 
 
 def _detect_gpu():
-    """Try to detect the NVIDIA GPU name and SM architecture."""
+    """Detect the NVIDIA GPU name and SM architecture via nvidia-smi."""
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name,compute_cap",
@@ -53,8 +53,10 @@ def _detect_gpu():
             name = parts[0]
             sm = parts[1].replace(".", "")
             return f"Auto-detected: NVIDIA {name} (SM_{sm})"
-    except Exception:
-        pass
+    except FileNotFoundError:
+        pass  # nvidia-smi not installed
+    except subprocess.SubprocessError:
+        pass  # nvidia-smi failed (no driver, no GPU)
     return "No GPU detected"
 
 
@@ -103,7 +105,7 @@ def find_site_map(search_dir=None):
 # ---------------------------------------------------------------------------
 
 def detect_gpu_arch():
-    """Detect the highest GPU compute capability available."""
+    """Detect the highest GPU compute capability available via nvidia-smi."""
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=compute_cap",
@@ -116,8 +118,10 @@ def detect_gpu_arch():
                 if len(parts) == 2:
                     major, minor = int(parts[0]), int(parts[1])
                     return major * 10 + minor
-    except Exception:
-        pass
+    except FileNotFoundError:
+        pass  # nvidia-smi not installed
+    except subprocess.SubprocessError:
+        pass  # nvidia-smi failed
     return None
 
 
@@ -142,8 +146,10 @@ def find_clang_for_pass(pass_lib):
                     )
                     if clang_path.returncode == 0:
                         return clang_path.stdout.strip(), llvm_ver
-    except Exception:
-        pass
+    except FileNotFoundError:
+        pass  # readelf not installed
+    except subprocess.SubprocessError:
+        pass  # readelf failed
 
     # For bundled versioned pass (libPrlxPass.llvm20.so), extract from filename
     m = re.search(r"llvm(\d+)", pass_lib.name)
@@ -158,7 +164,11 @@ def find_clang_for_pass(pass_lib):
 
 
 def find_best_ptxas_arch(gpu_cc):
-    """Find the best arch that ptxas supports for the detected GPU."""
+    """Find the best arch that ptxas supports for the detected GPU.
+
+    Falls back to SM 90 if nvcc is unavailable or the GPU arch
+    cannot be determined from nvcc --list-gpu-arch.
+    """
     try:
         result = subprocess.run(
             ["nvcc", "--list-gpu-arch"],
@@ -169,17 +179,18 @@ def find_best_ptxas_arch(gpu_cc):
             for line in result.stdout.strip().split("\n"):
                 line = line.strip()
                 if line.startswith("compute_"):
-                    try:
-                        arch = int(line.replace("compute_", ""))
+                    arch_str = line.replace("compute_", "")
+                    if arch_str.isdigit():
+                        arch = int(arch_str)
                         if arch <= gpu_cc and arch > max_arch:
                             max_arch = arch
-                    except ValueError:
-                        pass
             if max_arch > 0:
                 return max_arch
-    except Exception:
-        pass
-    return 90  # Fallback
+    except FileNotFoundError:
+        pass  # nvcc not installed
+    except subprocess.SubprocessError:
+        pass  # nvcc failed
+    return 90
 
 
 # ---------------------------------------------------------------------------

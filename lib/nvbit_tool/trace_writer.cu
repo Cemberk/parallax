@@ -142,13 +142,10 @@ bool TraceWriter::write(const std::string& path, bool compress) {
         return false;
     }
 
-    if (compress) {
-        // Write header uncompressed, payload compressed
-        // For now, write uncompressed (TODO: add zstd compression)
-        fwrite(buffer.data(), 1, buffer.size(), f);
-    } else {
-        fwrite(buffer.data(), 1, buffer.size(), f);
-    }
+    // NVBit trace writer does not support compression yet.
+    // The LLVM pass runtime (prlx_host.cu) handles zstd compression.
+    (void)compress;
+    fwrite(buffer.data(), 1, buffer.size(), f);
 
     fclose(f);
 

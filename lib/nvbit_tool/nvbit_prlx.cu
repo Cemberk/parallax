@@ -1,4 +1,4 @@
-// NVBit binary instrumentation tool for gpu-diffdbg.
+// NVBit binary instrumentation tool for prlx.
 //
 // This is the main NVBit tool. It registers callbacks for CUDA events,
 // instruments SASS instructions, and produces .prlx trace files compatible
@@ -128,7 +128,7 @@ static void receiver_thread_func() {
 static bool matches_filter(const std::string& kernel_name) {
     if (g_config.filter_pattern.empty()) return true;
 
-    // Simple substring match (TODO: glob matching)
+    // Substring match — glob patterns not supported yet
     return kernel_name.find(g_config.filter_pattern) != std::string::npos;
 }
 
@@ -194,7 +194,7 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
             nvbit_add_call_arg_mref_addr64(instr, 0); // address
-            nvbit_add_call_arg_const_val32(instr, 0);  // value (TODO: extract)
+            nvbit_add_call_arg_const_val32(instr, 0);  // value: not extractable at SASS level
         }
         else if (is_atomic_opcode(opcode)) {
             event_type = PRLX_EVENT_ATOMIC;
@@ -204,7 +204,7 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
             nvbit_add_call_arg_mref_addr64(instr, 0); // address
-            nvbit_add_call_arg_const_val32(instr, 0);  // operand (TODO: extract)
+            nvbit_add_call_arg_const_val32(instr, 0);  // operand: not extractable at SASS level
         }
         else if (is_func_exit_opcode(opcode)) {
             event_type = PRLX_EVENT_FUNC_EXIT;

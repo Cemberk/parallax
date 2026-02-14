@@ -387,8 +387,9 @@ void PrlxPass::instrumentAtomic(AtomicRMWInst* AI, SiteTable& siteTable, Module&
 }
 
 void PrlxPass::instrumentCmpXchg(AtomicCmpXchgInst* CI, SiteTable& siteTable, Module& M) {
-    // Similar to atomic RMW - omitted for brevity
-    // TODO: implement
+    // NOT YET IMPLEMENTED: CmpXchg (atomic compare-and-swap) instrumentation
+    // requires splitting the basic block to capture the result after the
+    // atomic completes. AtomicCmpXchg instructions will not appear in traces.
 }
 
 void PrlxPass::instrumentValueCaptures(BranchInst* BI, SiteTable& siteTable, Module& M) {
@@ -693,11 +694,11 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
                     MPM.addPass(prlx::PrlxPass());
                 });
 
-            // Also allow explicit invocation via -passes=gpu-diffdbg
+            // Also allow explicit invocation via -passes=prlx
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, ModulePassManager& MPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
-                    if (Name == "gpu-diffdbg") {
+                    if (Name == "prlx") {
                         MPM.addPass(prlx::PrlxPass());
                         return true;
                     }

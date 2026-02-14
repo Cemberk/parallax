@@ -2,7 +2,7 @@
 # PRLX: One-Click Demo Runner
 # Runs all validation scenarios with LLVM pass instrumentation + snapshot capture
 #
-# Usage: cd gpu-diffdbg && ./examples/run_all_demos.sh
+# Usage: ./examples/run_all_demos.sh
 
 set -e
 

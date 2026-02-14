@@ -138,10 +138,7 @@ class PrlxRuntime:
 
     def __del__(self):
         if self._initialized:
-            try:
-                self.shutdown()
-            except Exception:
-                pass
+            self.shutdown()
 
 
 @contextmanager

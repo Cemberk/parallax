@@ -138,12 +138,10 @@ def _instrument_llvm_ir(llvm_ir: str) -> str:
             link_cmd, capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
-            print(
-                f"[prlx] WARNING: llvm-link failed, skipping instrumentation:\n"
-                f"  {result.stderr[:500]}",
-                file=sys.stderr,
+            raise RuntimeError(
+                f"llvm-link failed (exit {result.returncode}):\n"
+                f"{result.stderr}"
             )
-            return llvm_ir
 
         # Step 2: Run instrumentation pass via opt
         opt_cmd = [
@@ -158,12 +156,10 @@ def _instrument_llvm_ir(llvm_ir: str) -> str:
             opt_cmd, capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
-            print(
-                f"[prlx] WARNING: opt pass failed, skipping instrumentation:\n"
-                f"  {result.stderr[:500]}",
-                file=sys.stderr,
+            raise RuntimeError(
+                f"prlx instrumentation pass failed (exit {result.returncode}):\n"
+                f"{result.stderr}"
             )
-            return llvm_ir
 
         with open(output_path) as f:
             instrumented = f.read()
