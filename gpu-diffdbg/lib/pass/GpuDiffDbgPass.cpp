@@ -10,6 +10,7 @@
 #include <string>
 #include <cstdlib>
 #include <sstream>
+#include <set>
 
 using namespace llvm;
 
@@ -147,6 +148,11 @@ void GpuDiffDbgPass::declareRuntimeFunctions(Module& M) {
     FunctionType* FuncFnTy = FunctionType::get(VoidTy, {I32Ty, I8Ty, I32Ty}, false);
     record_func_fn_ = Function::Create(FuncFnTy, Function::ExternalLinkage,
                                         "__gddbg_record_func", M);
+
+    // void __gddbg_record_value(uint32_t site_id, uint32_t value) [time-travel]
+    FunctionType* ValueFnTy = FunctionType::get(VoidTy, {I32Ty, I32Ty}, false);
+    record_value_fn_ = Function::Create(ValueFnTy, Function::ExternalLinkage,
+                                         "__gddbg_record_value", M);
 }
 
 void GpuDiffDbgPass::declareTraceBufferGlobal(Module& M) {
@@ -316,6 +322,79 @@ void GpuDiffDbgPass::instrumentCmpXchg(AtomicCmpXchgInst* CI, SiteTable& siteTab
     // TODO: implement
 }
 
+void GpuDiffDbgPass::instrumentValueCaptures(BranchInst* BI, SiteTable& siteTable, Module& M) {
+    // Time-travel: walk backward from branch condition to find contributing loads.
+    // For each load that feeds the branch, insert __gddbg_record_value() after it.
+    // This captures the data that led to the branch decision.
+    if (!BI->isConditional()) return;
+
+    LLVMContext& Ctx = M.getContext();
+    Value* Cond = BI->getCondition();
+
+    // Collect values to trace (operands of the comparison)
+    std::vector<Value*> operands;
+
+    if (auto* CmpI = dyn_cast<CmpInst>(Cond)) {
+        // ICmp or FCmp: capture both operands
+        operands.push_back(CmpI->getOperand(0));
+        operands.push_back(CmpI->getOperand(1));
+    } else {
+        // Direct bool condition - capture it
+        operands.push_back(Cond);
+    }
+
+    // For each operand, walk back to find the defining load (max 2 hops)
+    std::set<Instruction*> instrumented;
+    for (Value* Op : operands) {
+        // Walk up the def-use chain (max 2 hops) looking for loads
+        Value* Current = Op;
+        for (int hop = 0; hop < 2; hop++) {
+            auto* Inst = dyn_cast<Instruction>(Current);
+            if (!Inst) break;
+
+            if (auto* LI = dyn_cast<LoadInst>(Inst)) {
+                // Found a load - instrument it (skip if already done)
+                if (instrumented.count(LI)) break;
+                instrumented.insert(LI);
+
+                // Insert recording AFTER the load
+                IRBuilder<> Builder(Ctx);
+                Builder.SetInsertPoint(LI->getNextNonDebugInstruction());
+
+                uint32_t site_id = siteTable.getSiteId(LI, EVENT_BRANCH);
+
+                // Convert loaded value to i32
+                Value* ValI32 = nullptr;
+                Type* LoadTy = LI->getType();
+                if (LoadTy->isIntegerTy() && LoadTy->getIntegerBitWidth() <= 32) {
+                    ValI32 = Builder.CreateZExtOrTrunc(LI, Type::getInt32Ty(Ctx));
+                } else if (LoadTy->isFloatTy()) {
+                    ValI32 = Builder.CreateBitCast(LI, Type::getInt32Ty(Ctx));
+                } else if (LoadTy->isDoubleTy()) {
+                    Value* AsI64 = Builder.CreateBitCast(LI, Type::getInt64Ty(Ctx));
+                    ValI32 = Builder.CreateTrunc(AsI64, Type::getInt32Ty(Ctx));
+                }
+
+                if (ValI32) {
+                    CallInst* CI = Builder.CreateCall(record_value_fn_, {
+                        ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
+                        ValI32
+                    });
+                    CI->addFnAttr(Attribute::Convergent);
+                }
+                break;
+            }
+
+            // Walk through simple unary ops (cast, ext, trunc, etc.)
+            if (Inst->getNumOperands() >= 1 && isa<CastInst>(Inst)) {
+                Current = Inst->getOperand(0);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 void GpuDiffDbgPass::embedSiteTable(Module& M, const SiteTable& siteTable) {
     // Export site table to JSON file
     // The differ will read this file to map site_ids to source locations
@@ -401,6 +480,7 @@ PreservedAnalyses GpuDiffDbgPass::run(Module& M, ModuleAnalysisManager& AM) {
         // Instrument collected instructions
         for (auto* BI : branches) {
             instrumentBranch(BI, siteTable, M);
+            instrumentValueCaptures(BI, siteTable, M);  // Time-travel history
         }
         for (auto* SI : shmem_stores) {
             instrumentSharedMemStore(SI, siteTable, M);

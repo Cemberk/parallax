@@ -24,7 +24,9 @@ fn create_test_trace(kernel_name: &str, events: &[Vec<TraceEvent>]) -> NamedTemp
         _pad: 0,
         timestamp: 1234567890,
         cuda_arch: 80,
-        _reserved: [0; 5],
+        history_depth: 0,
+        history_section_offset: 0,
+        _reserved: [0; 3],
     };
 
     // Copy kernel name

@@ -8,6 +8,8 @@ use ratatui::Frame;
 
 use super::aligned::{event_type_short, AlignedRow, EventDisplay, RowDivergence};
 use super::app::{App, FocusPane, InputMode};
+use crate::site_map::SiteMap;
+use crate::trace_format::HistoryEntry;
 
 /// Which side of the split pane we're rendering.
 #[derive(Clone, Copy)]
@@ -21,11 +23,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Vertical split: event panes | detail pane | status bar.
+    let detail_height = if app.aligned.has_history() { 18 } else { 10 };
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(6),
-            Constraint::Length(10),
+            Constraint::Length(detail_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -222,22 +225,36 @@ fn draw_detail_pane(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let is_identical = app.total_divergences == 0;
+    let warp_idx = app.current_warp;
+    let selected = app.selected_row;
 
-    let content: Vec<Line> = if is_identical {
-        vec![Line::from(Span::styled(
-            "  Traces are IDENTICAL -- no divergences found",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        ))]
+    // Phase 1: get detail lines (warp_view takes &mut self for cache)
+    let (mut content, has_divergences) = if is_identical {
+        (
+            vec![Line::from(Span::styled(
+                "  Traces are IDENTICAL -- no divergences found",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ))],
+            false,
+        )
     } else {
-        let warp_idx = app.current_warp;
-        let selected = app.selected_row;
         let view = app.aligned.warp_view(warp_idx);
         if let Some(row) = view.rows.get(selected) {
-            format_detail(row)
+            let has_divs = !row.divergences.is_empty();
+            (format_detail(row), has_divs)
         } else {
-            vec![Line::from("  No event selected")]
+            (vec![Line::from("  No event selected")], false)
         }
     };
+
+    // Phase 2: append history (separate borrow, warp_view borrow is released)
+    if has_divergences && app.aligned.has_history() {
+        let (hist_a, hist_b) = app.aligned.get_history(warp_idx);
+        let site_map = app.aligned.site_map.as_ref();
+        format_history_lines(&mut content, &hist_a, &hist_b, site_map);
+    }
 
     let block = Block::default()
         .title(" Detail ")
@@ -447,6 +464,80 @@ fn format_mask_line(prefix: &str, mask: u32, other: u32) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Append value history lines to the detail content.
+fn format_history_lines(
+    lines: &mut Vec<Line<'static>>,
+    hist_a: &[HistoryEntry],
+    hist_b: &[HistoryEntry],
+    site_map: Option<&SiteMap>,
+) {
+    if hist_a.is_empty() && hist_b.is_empty() {
+        return;
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Value History:",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    let show_count = 4; // Show last N entries to fit in pane
+
+    if !hist_a.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "    Trace A:",
+            Style::default().fg(Color::Cyan),
+        )));
+        let start = hist_a.len().saturating_sub(show_count);
+        for (i, entry) in hist_a[start..].iter().enumerate() {
+            let offset = i as i32 - (hist_a[start..].len() as i32);
+            let loc = site_map
+                .and_then(|m| m.get(entry.site_id))
+                .map(|l| l.format_short())
+                .unwrap_or_else(|| format!("0x{:08x}", entry.site_id));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("      [{:+2}] ", offset),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("val={:<10} ", entry.value),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(loc, Style::default().fg(Color::Green)),
+            ]));
+        }
+    }
+
+    if !hist_b.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "    Trace B:",
+            Style::default().fg(Color::Magenta),
+        )));
+        let start = hist_b.len().saturating_sub(show_count);
+        for (i, entry) in hist_b[start..].iter().enumerate() {
+            let offset = i as i32 - (hist_b[start..].len() as i32);
+            let loc = site_map
+                .and_then(|m| m.get(entry.site_id))
+                .map(|l| l.format_short())
+                .unwrap_or_else(|| format!("0x{:08x}", entry.site_id));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("      [{:+2}] ", offset),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("val={:<10} ", entry.value),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::styled(loc, Style::default().fg(Color::Green)),
+            ]));
+        }
+    }
+}
+
 fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let line = match app.input_mode {
         InputMode::WarpJump => {
@@ -493,7 +584,11 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
                 ),
                 Span::styled(" | ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    "[n]ext [N]prev [/]warp [q]uit ",
+                    if app.aligned.has_history() {
+                        "[n]ext [N]prev [/]warp [q]uit [hist] "
+                    } else {
+                        "[n]ext [N]prev [/]warp [q]uit "
+                    },
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(kernel_name, Style::default().fg(Color::DarkGray)),

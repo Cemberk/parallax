@@ -3,6 +3,7 @@
 use colored::*;
 
 use crate::differ::{DiffResult, Divergence, DivergenceKind};
+use crate::parser::TraceFile;
 use crate::site_map::SiteMap;
 
 /// Print a summary of the diff result
@@ -185,8 +186,115 @@ fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>) {
     }
 }
 
+/// Print history context for divergences (time-travel)
+pub fn print_history_context(
+    result: &DiffResult,
+    trace_a: &TraceFile,
+    trace_b: &TraceFile,
+    max_shown: usize,
+    site_map: Option<&SiteMap>,
+) {
+    if result.is_identical() {
+        return;
+    }
+
+    let has_hist_a = trace_a.has_history();
+    let has_hist_b = trace_b.has_history();
+
+    if !has_hist_a && !has_hist_b {
+        println!(
+            "\n{}",
+            "No history data. Set GDDBG_HISTORY_DEPTH=64 to enable time-travel."
+                .dimmed()
+        );
+        return;
+    }
+
+    println!("\n{}", "=== Value History (Time-Travel) ===".bold());
+
+    let mut shown = 0;
+    for div in &result.divergences {
+        if shown >= max_shown {
+            break;
+        }
+
+        let warp = div.warp_idx as usize;
+
+        let hist_a = trace_a.get_ordered_history(warp).unwrap_or_default();
+        let hist_b = trace_b.get_ordered_history(warp).unwrap_or_default();
+
+        if hist_a.is_empty() && hist_b.is_empty() {
+            continue;
+        }
+
+        let loc_str = if let Some(map) = site_map {
+            if let Some(loc) = map.get(div.site_id) {
+                loc.format_short().to_string()
+            } else {
+                format!("0x{:08x}", div.site_id)
+            }
+        } else {
+            format!("0x{:08x}", div.site_id)
+        };
+
+        println!(
+            "\n  {} {} (warp {})",
+            "Divergence at".bold(),
+            loc_str.green(),
+            div.warp_idx
+        );
+
+        // Show last N history entries for each trace
+        let show_count = 8;
+        let start_a = hist_a.len().saturating_sub(show_count);
+        let start_b = hist_b.len().saturating_sub(show_count);
+
+        if !hist_a.is_empty() {
+            println!("    {}", "Trace A history:".cyan());
+            for (i, entry) in hist_a[start_a..].iter().enumerate() {
+                let offset = i as i32 - (hist_a[start_a..].len() as i32);
+                let entry_loc = if let Some(map) = site_map {
+                    if let Some(loc) = map.get(entry.site_id) {
+                        loc.format_short().to_string()
+                    } else {
+                        format!("0x{:08x}", entry.site_id)
+                    }
+                } else {
+                    format!("0x{:08x}", entry.site_id)
+                };
+                println!(
+                    "      [{:+3}] value={:<10} ({}) seq={}",
+                    offset, entry.value, entry_loc, entry.seq
+                );
+            }
+        }
+
+        if !hist_b.is_empty() {
+            println!("    {}", "Trace B history:".magenta());
+            for (i, entry) in hist_b[start_b..].iter().enumerate() {
+                let offset = i as i32 - (hist_b[start_b..].len() as i32);
+                let entry_loc = if let Some(map) = site_map {
+                    if let Some(loc) = map.get(entry.site_id) {
+                        loc.format_short().to_string()
+                    } else {
+                        format!("0x{:08x}", entry.site_id)
+                    }
+                } else {
+                    format!("0x{:08x}", entry.site_id)
+                };
+                println!(
+                    "      [{:+3}] value={:<10} ({}) seq={}",
+                    offset, entry.value, entry_loc, entry.seq
+                );
+            }
+        }
+
+        shown += 1;
+    }
+}
+
 /// Print trace file header information
-pub fn print_trace_info(name: &str, trace: &crate::parser::TraceFile) {
+pub fn print_trace_info(name: &str, trace: &TraceFile) {
     let header = trace.header();
     println!("\n{}", format!("=== {} ===", name).bold());
     println!("Kernel:     {}", header.kernel_name_str());

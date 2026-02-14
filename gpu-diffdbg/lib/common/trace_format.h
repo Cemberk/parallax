@@ -16,6 +16,14 @@ extern "C" {
 // Default configuration
 #define GDDBG_EVENTS_PER_WARP 4096
 
+// Header flags
+#define GDDBG_FLAG_COMPACT  0x1   // Bit 0: compact event format
+#define GDDBG_FLAG_COMPRESS 0x2   // Bit 1: zstd compressed
+#define GDDBG_FLAG_HISTORY  0x4   // Bit 2: history ring section appended
+
+// History (time-travel) defaults
+#define GDDBG_HISTORY_DEPTH_DEFAULT 64
+
 // Event types
 #define EVENT_BRANCH      0
 #define EVENT_SHMEM_STORE 1
@@ -58,7 +66,7 @@ typedef struct {
 typedef struct {
     uint64_t magic;             // GDDBG_MAGIC
     uint32_t version;           // GDDBG_VERSION
-    uint32_t flags;             // Bit 0: compact format, Bit 1: compressed
+    uint32_t flags;             // GDDBG_FLAG_* bitmask
 
     // Kernel identification
     uint64_t kernel_name_hash;
@@ -74,8 +82,36 @@ typedef struct {
     // Metadata
     uint64_t timestamp;
     uint32_t cuda_arch;         // e.g., 80 for SM_80
-    uint32_t _reserved[5];      // Padding to make 160 bytes (multiple of 16)
+
+    // History / reserved fields (20 bytes to reach 160 total)
+    // When GDDBG_FLAG_HISTORY is set:
+    //   history_depth: entries per warp in the history ring buffer
+    //   history_section_offset: byte offset from file start to history data
+    //     (0 = immediately after warp event buffers)
+    uint32_t history_depth;             // [0] History entries per warp (0 = no history)
+    uint32_t history_section_offset;    // [1] Byte offset to history section (0 = auto)
+    uint32_t _reserved[3];             // [2-4] Padding to make 160 bytes
 } TraceFileHeader;
+
+// ---- History (Time-Travel) Structures ----
+// Appended after all warp event buffers when GDDBG_FLAG_HISTORY is set.
+// Layout per warp: [HistoryRingHeader][HistoryEntry * depth]
+
+// Per-warp history ring header (16 bytes)
+typedef struct {
+    uint32_t write_idx;     // Current write position (wraps via modulo)
+    uint32_t depth;         // Ring capacity (same as TraceFileHeader.history_depth)
+    uint32_t total_writes;  // Monotonic counter (detects wrap: total_writes > depth)
+    uint32_t _reserved;
+} HistoryRingHeader;
+
+// Single history entry (16 bytes, aligned for v4.u32 stores)
+typedef struct __attribute__((aligned(16))) {
+    uint32_t site_id;       // Source location hash
+    uint32_t value;         // Captured variable value
+    uint32_t seq;           // Monotonic sequence number (for chronological ordering)
+    uint32_t _pad;          // Alignment padding
+} HistoryEntry;
 
 // Site table entry
 typedef struct {

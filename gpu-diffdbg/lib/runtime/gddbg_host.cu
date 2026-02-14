@@ -8,6 +8,9 @@
 // Global state
 static void* d_trace_buffer = nullptr;
 static size_t trace_buffer_size = 0;
+static void* d_history_buffer = nullptr;
+static size_t history_buffer_size = 0;
+static uint32_t history_depth = 0;
 static char output_path[256] = "trace.gddbg";
 static bool initialized = false;
 static bool enabled = true;
@@ -42,6 +45,13 @@ extern "C" void gddbg_init(void) {
     const char* buffer_size_str = getenv("GDDBG_BUFFER_SIZE");
     if (buffer_size_str) {
         events_per_warp = atoi(buffer_size_str);
+    }
+
+    const char* history_depth_str = getenv("GDDBG_HISTORY_DEPTH");
+    if (history_depth_str) {
+        history_depth = atoi(history_depth_str);
+    } else {
+        history_depth = GDDBG_HISTORY_DEPTH_DEFAULT;
     }
 
     initialized = true;
@@ -84,7 +94,9 @@ extern "C" void gddbg_pre_launch(const char* kernel_name, dim3 gridDim, dim3 blo
     TraceFileHeader header = {};
     header.magic = GDDBG_MAGIC;
     header.version = GDDBG_VERSION;
-    header.flags = 0;
+    header.flags = (history_depth > 0) ? GDDBG_FLAG_HISTORY : 0;
+    header.history_depth = history_depth;
+    header.history_section_offset = 0;  // 0 = immediately after event buffers
     header.kernel_name_hash = fnv1a_hash(kernel_name);
     strncpy(header.kernel_name, kernel_name, sizeof(header.kernel_name) - 1);
     header.grid_dim[0] = gridDim.x;
@@ -120,6 +132,45 @@ extern "C" void gddbg_pre_launch(const char* kernel_name, dim3 gridDim, dim3 blo
         d_trace_buffer = nullptr;
         enabled = false;
         return;
+    }
+
+    // Allocate history ring buffer if enabled
+    if (history_depth > 0) {
+        size_t ring_size = sizeof(HistoryRingHeader) + history_depth * sizeof(HistoryEntry);
+        history_buffer_size = total_warps * ring_size;
+
+        err = cudaMalloc(&d_history_buffer, history_buffer_size);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[gddbg] WARNING: history buffer allocation failed: %s (disabling history)\n",
+                    cudaGetErrorString(err));
+            d_history_buffer = nullptr;
+            history_buffer_size = 0;
+            // Update header to remove history flag
+            header.flags &= ~GDDBG_FLAG_HISTORY;
+            header.history_depth = 0;
+            cudaMemcpy(d_trace_buffer, &header, sizeof(header), cudaMemcpyHostToDevice);
+        } else {
+            cudaMemset(d_history_buffer, 0, history_buffer_size);
+
+            // Initialize each ring header with the depth
+            void* h_ring_init = malloc(ring_size);
+            memset(h_ring_init, 0, ring_size);
+            ((HistoryRingHeader*)h_ring_init)->depth = history_depth;
+            for (uint32_t w = 0; w < total_warps; w++) {
+                cudaMemcpy((char*)d_history_buffer + w * ring_size, h_ring_init,
+                           sizeof(HistoryRingHeader), cudaMemcpyHostToDevice);
+            }
+            free(h_ring_init);
+
+            // Set device globals
+            extern __device__ char* g_gddbg_history_buffer;
+            extern __device__ uint32_t g_gddbg_history_depth;
+            cudaMemcpyToSymbol(g_gddbg_history_buffer, &d_history_buffer, sizeof(void*));
+            cudaMemcpyToSymbol(g_gddbg_history_depth, &history_depth, sizeof(uint32_t));
+
+            fprintf(stderr, "[gddbg] History buffer: %zu KB (%u entries/warp, %u warps)\n",
+                    history_buffer_size / 1024, history_depth, total_warps);
+        }
     }
 
     fprintf(stderr, "[gddbg] Trace buffer ready for kernel: %s\n", kernel_name);
@@ -164,15 +215,56 @@ extern "C" void gddbg_post_launch(void) {
     fprintf(stderr, "[gddbg] Recorded %lu events across %u warps (%lu overflows)\n",
             total_events, header->total_warp_slots, total_overflows);
 
+    // Copy history buffer if present
+    void* h_history = nullptr;
+    if (d_history_buffer && history_buffer_size > 0) {
+        h_history = malloc(history_buffer_size);
+        if (h_history) {
+            err = cudaMemcpy(h_history, d_history_buffer, history_buffer_size,
+                             cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess) {
+                fprintf(stderr, "[gddbg] WARNING: history copy failed: %s\n",
+                        cudaGetErrorString(err));
+                free(h_history);
+                h_history = nullptr;
+            } else {
+                uint64_t total_hist = 0;
+                size_t ring_size = sizeof(HistoryRingHeader)
+                                 + history_depth * sizeof(HistoryEntry);
+                for (uint32_t i = 0; i < header->total_warp_slots; i++) {
+                    HistoryRingHeader* ring = (HistoryRingHeader*)((char*)h_history + i * ring_size);
+                    total_hist += (ring->total_writes < history_depth)
+                                ? ring->total_writes : history_depth;
+                }
+                fprintf(stderr, "[gddbg] History: %lu entries across %u warps\n",
+                        total_hist, header->total_warp_slots);
+            }
+        }
+    }
+
     // Write to file
     FILE* f = fopen(output_path, "wb");
     if (!f) {
         fprintf(stderr, "[gddbg] ERROR: cannot open output file: %s\n", output_path);
         free(h_buffer);
+        if (h_history) free(h_history);
         return;
     }
 
+    // Write main trace data
     size_t written = fwrite(h_buffer, 1, trace_buffer_size, f);
+    size_t total_written = written;
+
+    // Append history section
+    if (h_history && written == trace_buffer_size) {
+        size_t hist_written = fwrite(h_history, 1, history_buffer_size, f);
+        total_written += hist_written;
+        if (hist_written != history_buffer_size) {
+            fprintf(stderr, "[gddbg] WARNING: incomplete history write (%zu of %zu bytes)\n",
+                    hist_written, history_buffer_size);
+        }
+    }
+
     fclose(f);
 
     if (written != trace_buffer_size) {
@@ -180,14 +272,29 @@ extern "C" void gddbg_post_launch(void) {
                 written, trace_buffer_size);
     } else {
         fprintf(stderr, "[gddbg] Trace written to: %s (%zu MB)\n",
-                output_path, trace_buffer_size / (1024*1024));
+                output_path, total_written / (1024*1024));
     }
 
     free(h_buffer);
+    if (h_history) free(h_history);
 
-    // Free device buffer
+    // Free device buffers
     cudaFree(d_trace_buffer);
     d_trace_buffer = nullptr;
+
+    if (d_history_buffer) {
+        cudaFree(d_history_buffer);
+        d_history_buffer = nullptr;
+        history_buffer_size = 0;
+
+        // Clear history device globals
+        void* null_ptr = nullptr;
+        uint32_t zero = 0;
+        extern __device__ char* g_gddbg_history_buffer;
+        extern __device__ uint32_t g_gddbg_history_depth;
+        cudaMemcpyToSymbol(g_gddbg_history_buffer, &null_ptr, sizeof(void*));
+        cudaMemcpyToSymbol(g_gddbg_history_depth, &zero, sizeof(uint32_t));
+    }
 
     // Clear the global device pointer
     void* null_ptr = nullptr;
@@ -199,6 +306,11 @@ extern "C" void gddbg_shutdown(void) {
     if (d_trace_buffer) {
         cudaFree(d_trace_buffer);
         d_trace_buffer = nullptr;
+    }
+    if (d_history_buffer) {
+        cudaFree(d_history_buffer);
+        d_history_buffer = nullptr;
+        history_buffer_size = 0;
     }
 }
 

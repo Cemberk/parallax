@@ -24,6 +24,10 @@ typedef struct {
 // Global device pointer to trace buffer (set by host via cudaMemcpyToSymbol)
 extern __device__ TraceBuffer* g_gddbg_buffer;
 
+// History ring buffer (separate allocation, set when GDDBG_HISTORY_DEPTH > 0)
+extern __device__ char* g_gddbg_history_buffer;
+extern __device__ uint32_t g_gddbg_history_depth;
+
 // ---- Region of Interest (ROI) Toggle ----
 // Users can enable/disable recording from within their kernel code.
 // This allows targeting specific code paths or time slices.
@@ -65,6 +69,12 @@ extern "C" {
         uint32_t site_id,
         uint8_t  is_entry,
         uint32_t arg0
+    );
+
+    // History (time-travel): record a variable value into per-warp circular buffer
+    __device__ void __gddbg_record_value(
+        uint32_t site_id,
+        uint32_t value
     );
 }
 

@@ -12,6 +12,14 @@ pub const GDDBG_VERSION: u32 = 1;
 /// Default number of events per warp
 pub const GDDBG_EVENTS_PER_WARP: usize = 4096;
 
+/// Header flags
+pub const GDDBG_FLAG_COMPACT: u32 = 0x1;
+pub const GDDBG_FLAG_COMPRESS: u32 = 0x2;
+pub const GDDBG_FLAG_HISTORY: u32 = 0x4;
+
+/// Default history ring depth (entries per warp)
+pub const GDDBG_HISTORY_DEPTH_DEFAULT: usize = 64;
+
 /// Event type constants
 pub const EVENT_BRANCH: u8 = 0;
 pub const EVENT_SHMEM_STORE: u8 = 1;
@@ -47,7 +55,11 @@ pub struct TraceFileHeader {
     pub _pad: u32,                  // 4 bytes, offset 124 (padding before timestamp)
     pub timestamp: u64,             // 8 bytes, offset 128
     pub cuda_arch: u32,             // 4 bytes, offset 136
-    pub _reserved: [u32; 5],        // 20 bytes, offset 140
+
+    // History / reserved fields (20 bytes to reach 160 total)
+    pub history_depth: u32,         // 4 bytes, offset 140 (history entries per warp)
+    pub history_section_offset: u32, // 4 bytes, offset 144 (byte offset to history, 0=auto)
+    pub _reserved: [u32; 3],        // 12 bytes, offset 148
 }
 
 // Compile-time assertion that header is exactly 160 bytes
@@ -84,6 +96,30 @@ pub struct WarpBufferHeader {
 
 const _: () = assert!(std::mem::size_of::<WarpBufferHeader>() == 16);
 
+/// Per-warp history ring header (16 bytes - MUST match C++ HistoryRingHeader)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct HistoryRingHeader {
+    pub write_idx: u32,     // Current write position (wraps via modulo)
+    pub depth: u32,         // Ring capacity
+    pub total_writes: u32,  // Monotonic counter (total_writes > depth means wrapped)
+    pub _reserved: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<HistoryRingHeader>() == 16);
+
+/// Single history entry (16 bytes - MUST match C++ HistoryEntry)
+#[repr(C, align(16))]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct HistoryEntry {
+    pub site_id: u32,       // Source location hash
+    pub value: u32,         // Captured variable value
+    pub seq: u32,           // Monotonic sequence number
+    pub _pad: u32,          // Alignment padding
+}
+
+const _: () = assert!(std::mem::size_of::<HistoryEntry>() == 16);
+
 impl TraceFileHeader {
     /// Get the kernel name as a Rust string (strips null padding)
     pub fn kernel_name_str(&self) -> &str {
@@ -91,12 +127,42 @@ impl TraceFileHeader {
         std::str::from_utf8(&self.kernel_name[..null_pos]).unwrap_or("<invalid utf8>")
     }
 
-    /// Calculate the expected file size in bytes
+    /// Calculate the expected file size in bytes (event section only)
     pub fn expected_file_size(&self) -> usize {
         let warp_buffer_size = std::mem::size_of::<WarpBufferHeader>()
             + self.events_per_warp as usize * std::mem::size_of::<TraceEvent>();
         std::mem::size_of::<TraceFileHeader>()
             + self.total_warp_slots as usize * warp_buffer_size
+    }
+
+    /// Check if history data is present
+    pub fn has_history(&self) -> bool {
+        self.flags & GDDBG_FLAG_HISTORY != 0 && self.history_depth > 0
+    }
+
+    /// Calculate the byte offset where the history section starts
+    pub fn history_offset(&self) -> usize {
+        if self.history_section_offset > 0 {
+            self.history_section_offset as usize
+        } else {
+            self.expected_file_size()
+        }
+    }
+
+    /// Calculate the size of one warp's history ring (header + entries)
+    pub fn history_ring_size(&self) -> usize {
+        std::mem::size_of::<HistoryRingHeader>()
+            + self.history_depth as usize * std::mem::size_of::<HistoryEntry>()
+    }
+
+    /// Calculate the expected total file size including history
+    pub fn expected_file_size_with_history(&self) -> usize {
+        let base = self.expected_file_size();
+        if self.has_history() {
+            base + self.total_warp_slots as usize * self.history_ring_size()
+        } else {
+            base
+        }
     }
 }
 

@@ -50,6 +50,9 @@ private:
     // Instrument a compare-exchange atomic
     void instrumentCmpXchg(llvm::AtomicCmpXchgInst* CI, SiteTable& siteTable, llvm::Module& M);
 
+    // Instrument value captures for loads feeding branch conditions (time-travel)
+    void instrumentValueCaptures(llvm::BranchInst* BI, SiteTable& siteTable, llvm::Module& M);
+
     // Embed site table as global constant in the module
     void embedSiteTable(llvm::Module& M, const SiteTable& siteTable);
 
@@ -58,6 +61,7 @@ private:
     llvm::Function* record_shmem_store_fn_ = nullptr;
     llvm::Function* record_atomic_fn_ = nullptr;
     llvm::Function* record_func_fn_ = nullptr;
+    llvm::Function* record_value_fn_ = nullptr;
 
     // Selective instrumentation: function name filters
     // Empty = instrument everything (default)

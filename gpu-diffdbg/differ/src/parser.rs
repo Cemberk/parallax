@@ -7,7 +7,8 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::trace_format::{
-    TraceEvent, TraceFileHeader, WarpBufferHeader, GDDBG_MAGIC, GDDBG_VERSION,
+    HistoryEntry, HistoryRingHeader, TraceEvent, TraceFileHeader, WarpBufferHeader,
+    GDDBG_FLAG_HISTORY, GDDBG_MAGIC, GDDBG_VERSION,
 };
 
 /// Memory-mapped trace file with zero-copy access to events
@@ -153,6 +154,90 @@ impl TraceFile {
             .map(|(_, header, _)| header.overflow_count as usize)
             .sum()
     }
+
+    /// Check if this trace file contains history data
+    pub fn has_history(&self) -> bool {
+        self.header.has_history()
+    }
+
+    /// Get the history ring for a specific warp (zero-copy)
+    ///
+    /// Returns None if:
+    /// - History flag is not set in the header
+    /// - File doesn't have enough data for the history section
+    pub fn get_warp_history(
+        &self,
+        warp_index: usize,
+    ) -> Result<Option<(&HistoryRingHeader, &[HistoryEntry])>> {
+        if !self.header.has_history() {
+            return Ok(None);
+        }
+
+        if warp_index >= self.header.total_warp_slots as usize {
+            bail!(
+                "Warp index {} out of range (total warps: {})",
+                warp_index,
+                self.header.total_warp_slots
+            );
+        }
+
+        let history_offset = self.header.history_offset();
+        let ring_size = self.header.history_ring_size();
+        let depth = self.header.history_depth as usize;
+
+        let warp_ring_offset = history_offset + warp_index * ring_size;
+        let warp_ring_end = warp_ring_offset + ring_size;
+
+        // Gracefully handle truncated files (backward compat)
+        if warp_ring_end > self.data().len() {
+            return Ok(None);
+        }
+
+        let ring_data = &self.data()[warp_ring_offset..warp_ring_end];
+
+        // Parse ring header
+        let ring_header: &HistoryRingHeader =
+            from_bytes(&ring_data[..std::mem::size_of::<HistoryRingHeader>()]);
+
+        // Parse entries
+        let entries_data = &ring_data[std::mem::size_of::<HistoryRingHeader>()..];
+        let entries: &[HistoryEntry] = try_cast_slice(entries_data)
+            .map_err(|e| anyhow!("Failed to cast history entries: {}", e))?;
+
+        let entries = &entries[..depth.min(entries.len())];
+
+        Ok(Some((ring_header, entries)))
+    }
+
+    /// Get ordered history entries for a warp, sorted by sequence number (most recent last)
+    pub fn get_ordered_history(&self, warp_index: usize) -> Result<Vec<HistoryEntry>> {
+        match self.get_warp_history(warp_index)? {
+            None => Ok(Vec::new()),
+            Some((ring_header, entries)) => {
+                let depth = ring_header.depth as usize;
+                let total = ring_header.total_writes as usize;
+
+                if total == 0 {
+                    return Ok(Vec::new());
+                }
+
+                // How many valid entries?
+                let valid_count = total.min(depth);
+
+                // Collect valid entries and sort by seq
+                let mut ordered: Vec<HistoryEntry> = if total <= depth {
+                    // Ring hasn't wrapped - entries [0..total) are valid
+                    entries[..valid_count].to_vec()
+                } else {
+                    // Ring has wrapped - all entries are valid
+                    entries[..depth].to_vec()
+                };
+
+                ordered.sort_by_key(|e| e.seq);
+                Ok(ordered)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +250,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<TraceFileHeader>(), 160);
         assert_eq!(std::mem::size_of::<TraceEvent>(), 16);
         assert_eq!(std::mem::size_of::<WarpBufferHeader>(), 16);
+        assert_eq!(std::mem::size_of::<HistoryRingHeader>(), 16);
+        assert_eq!(std::mem::size_of::<HistoryEntry>(), 16);
     }
 }

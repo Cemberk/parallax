@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::differ::{DiffResult, Divergence, DivergenceKind};
 use crate::parser::TraceFile;
 use crate::site_map::SiteMap;
-use crate::trace_format::TraceEvent;
+use crate::trace_format::{HistoryEntry, TraceEvent};
 
 /// How a single row's events diverge (if at all).
 #[derive(Debug, Clone)]
@@ -124,6 +124,24 @@ impl AlignedTrace {
 
     pub fn num_warps(&self) -> u32 {
         self.trace_a.header().total_warp_slots
+    }
+
+    /// Check if either trace has history data
+    pub fn has_history(&self) -> bool {
+        self.trace_a.has_history() || self.trace_b.has_history()
+    }
+
+    /// Get ordered history entries for a warp from both traces
+    pub fn get_history(&self, warp_idx: u32) -> (Vec<HistoryEntry>, Vec<HistoryEntry>) {
+        let hist_a = self
+            .trace_a
+            .get_ordered_history(warp_idx as usize)
+            .unwrap_or_default();
+        let hist_b = self
+            .trace_b
+            .get_ordered_history(warp_idx as usize)
+            .unwrap_or_default();
+        (hist_a, hist_b)
     }
 
     /// Get (or build) the aligned view for a warp.

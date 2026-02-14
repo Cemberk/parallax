@@ -10,6 +10,10 @@ __device__ TraceBuffer* g_gddbg_buffer = nullptr;
 // Users call gddbg_enable() / gddbg_disable() from kernel code
 __device__ volatile int __gddbg_recording_enabled = 1;
 
+// History ring buffer globals (set by host when GDDBG_HISTORY_DEPTH > 0)
+__device__ char* g_gddbg_history_buffer = nullptr;
+__device__ uint32_t g_gddbg_history_depth = 0;
+
 // Compute linear warp ID within the grid
 __device__ __forceinline__ uint32_t __gddbg_warp_id() {
     // Thread ID within block
@@ -37,16 +41,9 @@ __device__ __forceinline__ uint32_t __gddbg_lane_id() {
     return lane;
 }
 
-// Cache-bypassing store to avoid thrashing L1 (Death Valley 3 mitigation)
+// Cache-bypassing store for 16-byte aligned data (Death Valley 3 mitigation)
 // Uses st.global.cg (cache at L2 only, bypass L1)
-__device__ __forceinline__ void __gddbg_store_event(TraceEvent* dst, const TraceEvent& evt) {
-    // Emit PTX inline assembly for cache-global store
-    // st.global.cg stores to L2 cache bypassing L1, minimizing interference
-    // with the kernel's working set
-    // Requires 16-byte alignment (ensured by __attribute__((aligned(16))) on TraceEvent)
-
-    const uint32_t* src = reinterpret_cast<const uint32_t*>(&evt);
-
+__device__ __forceinline__ void __gddbg_store_16b(void* dst, const uint32_t* src) {
     asm volatile(
         "st.global.cg.v4.u32 [%0], {%1, %2, %3, %4};"
         :
@@ -57,6 +54,12 @@ __device__ __forceinline__ void __gddbg_store_event(TraceEvent* dst, const Trace
           "r"(src[3])
         : "memory"
     );
+}
+
+// Cache-bypassing store to avoid thrashing L1 (Death Valley 3 mitigation)
+// Uses st.global.cg (cache at L2 only, bypass L1)
+__device__ __forceinline__ void __gddbg_store_event(TraceEvent* dst, const TraceEvent& evt) {
+    __gddbg_store_16b(dst, reinterpret_cast<const uint32_t*>(&evt));
 }
 
 // Record a branch event
@@ -220,4 +223,45 @@ extern "C" __device__ void __gddbg_record_func(
     evt.value_a = arg0;
 
     __gddbg_store_event(&events[idx], evt);
+}
+
+// Record a value into the per-warp circular history ring buffer (time-travel)
+extern "C" __device__ void __gddbg_record_value(
+    uint32_t site_id,
+    uint32_t value
+) {
+    if (__gddbg_lane_id() != 0) return;
+    if (!__gddbg_recording_enabled) return;
+
+    // Check if history is enabled
+    char* hist_buf = g_gddbg_history_buffer;
+    if (hist_buf == nullptr) return;
+
+    uint32_t depth = g_gddbg_history_depth;
+    if (depth == 0) return;
+
+    uint32_t warp = __gddbg_warp_id();
+
+    // Per-warp history ring: [HistoryRingHeader][HistoryEntry * depth]
+    size_t ring_size = sizeof(HistoryRingHeader) + depth * sizeof(HistoryEntry);
+    char* ring_base = hist_buf + warp * ring_size;
+    HistoryRingHeader* ring = (HistoryRingHeader*)ring_base;
+    HistoryEntry* entries = (HistoryEntry*)(ring_base + sizeof(HistoryRingHeader));
+
+    // Circular write: atomically increment and wrap
+    uint32_t raw_idx = atomicAdd(&ring->write_idx, 1);
+    uint32_t slot = raw_idx % depth;
+
+    // Track total writes for ordering (also used to detect wrap)
+    uint32_t seq = atomicAdd(&ring->total_writes, 1);
+
+    // Build history entry
+    HistoryEntry entry;
+    entry.site_id = site_id;
+    entry.value = value;
+    entry.seq = seq;
+    entry._pad = 0;
+
+    // Store with cache bypass
+    __gddbg_store_16b(&entries[slot], reinterpret_cast<const uint32_t*>(&entry));
 }
