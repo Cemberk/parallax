@@ -216,6 +216,8 @@ def cmd_diff(args):
         cmd.extend(["-n", str(args.max_shown)])
     if hasattr(args, "tui") and args.tui:
         cmd.append("--tui")
+    if hasattr(args, "force") and args.force:
+        cmd.append("--force")
 
     return subprocess.call(cmd)
 
@@ -299,6 +301,7 @@ def cmd_check(args):
                 self.lookahead = args.lookahead
                 self.max_shown = args.max_shown
                 self.tui = getattr(args, "tui", False)
+                self.force = getattr(args, "force", False)
 
         return cmd_diff(DiffArgs())
 
@@ -523,6 +526,8 @@ Examples:
                         help="Lookahead window size")
     p_diff.add_argument("--tui", action="store_true",
                         help="Launch interactive TUI viewer")
+    p_diff.add_argument("--force", action="store_true",
+                        help="Skip kernel name check (compare different variants)")
 
     # run
     p_run = subparsers.add_parser("run",

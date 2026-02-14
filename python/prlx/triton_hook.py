@@ -153,6 +153,7 @@ def _hook_triton_stages(verbose: bool):
 def _wrap_triton_launch(verbose: bool):
     global _original_launch
 
+    from triton import knobs
     from triton.runtime import JITFunction
 
     if _original_launch is not None:
@@ -165,7 +166,25 @@ def _wrap_triton_launch(verbose: bool):
         return
 
     from .runtime import PrlxRuntime
+    from ._module_binder import ModuleBinder
+
     runtime = PrlxRuntime(str(rt_lib))
+    binder = ModuleBinder(runtime, verbose=verbose)
+
+    # Install launch_enter_hook: fires RIGHT BEFORE cuLaunchKernel.
+    # This is where we bind device globals (g_prlx_buffer, etc.) into
+    # the Triton kernel's CUmodule via CUDA Driver API.
+    def _prlx_launch_enter(metadata):
+        if os.environ.get("PRLX_ENABLED", "1") == "0":
+            return
+        fn_handle = metadata.data.get("function")
+        if fn_handle is not None:
+            binder.bind_module(int(fn_handle))
+
+    knobs.runtime.launch_enter_hook = _prlx_launch_enter
+
+    if verbose:
+        print("[prlx] launch_enter_hook installed", file=sys.stderr)
 
     _original_launch = JITFunction.run
 
@@ -186,6 +205,8 @@ def _wrap_triton_launch(verbose: bool):
         kernel_name = getattr(self, "__name__", "triton_kernel")
 
         runtime.pre_launch(kernel_name, grid_dim, block_dim)
+        # Invalidate binder cache — pre_launch allocated new buffers
+        binder.invalidate()
         result = _original_launch(self, *args, **kwargs)
         runtime.post_launch()
 
@@ -207,5 +228,6 @@ def uninstall():
 
     from triton import knobs
     knobs.runtime.add_stages_inspection_hook = None
+    knobs.runtime.launch_enter_hook = None
 
     _installed = False

@@ -62,3 +62,5 @@ python/prlx/data/include/
 
 # Virtual environment
 .venv/
+*.deb
+demos/

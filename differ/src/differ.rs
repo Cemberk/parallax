@@ -16,6 +16,8 @@ pub struct DiffConfig {
     pub max_divergences: usize,
     /// Lookahead window size for drift detection
     pub lookahead_window: usize,
+    /// Skip kernel name check (for comparing different kernel variants)
+    pub force: bool,
 }
 
 impl Default for DiffConfig {
@@ -24,6 +26,7 @@ impl Default for DiffConfig {
             compare_values: false,
             max_divergences: 0, // unlimited
             lookahead_window: 32,
+            force: false,
         }
     }
 }
@@ -126,7 +129,7 @@ pub fn diff_traces_with_remap(
     config: &DiffConfig,
     remapper: Option<&SiteRemapper>,
 ) -> Result<DiffResult> {
-    validate_traces(trace_a, trace_b)?;
+    validate_traces(trace_a, trace_b, config.force)?;
 
     let header_a = trace_a.header();
     let header_b = trace_b.header();
@@ -228,18 +231,27 @@ pub fn diff_traces_with_remap(
 }
 
 /// Validate that two traces are compatible for comparison
-fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile) -> Result<()> {
+fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile, force: bool) -> Result<()> {
     let header_a = trace_a.header();
     let header_b = trace_b.header();
 
     if header_a.kernel_name_hash != header_b.kernel_name_hash {
-        bail!(
-            "Kernel mismatch: '{}' (0x{:016x}) vs '{}' (0x{:016x})",
-            header_a.kernel_name_str(),
-            header_a.kernel_name_hash,
-            header_b.kernel_name_str(),
-            header_b.kernel_name_hash
-        );
+        if force {
+            eprintln!(
+                "Warning: Kernel mismatch (--force): '{}' vs '{}'",
+                header_a.kernel_name_str(),
+                header_b.kernel_name_str()
+            );
+        } else {
+            bail!(
+                "Kernel mismatch: '{}' (0x{:016x}) vs '{}' (0x{:016x})\n\
+                 Hint: use --force to compare different kernel variants",
+                header_a.kernel_name_str(),
+                header_a.kernel_name_hash,
+                header_b.kernel_name_str(),
+                header_b.kernel_name_hash
+            );
+        }
     }
 
     if header_a.grid_dim != header_b.grid_dim {

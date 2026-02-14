@@ -238,14 +238,15 @@ void nvbit_at_init() {
             g_config.filter_pattern.c_str());
 
     g_writer = new prlx::TraceWriter(g_config.buffer_size);
-
-    // Allocate channel device memory here (not in nvbit_at_ctx_init) to avoid
-    // deadlocks — NVBit 1.7.7+ warns against CUDA allocations in ctx_init.
-    cudaMallocManaged(&g_channel_dev, sizeof(ChannelDev));
 }
 
 void nvbit_at_ctx_init(CUcontext ctx) {
     if (!g_config.enabled) return;
+
+    // Allocate channel device memory here (inside ctx_init) so that NVBit
+    // properly tracks the CUDA context. Allocating in nvbit_at_init() creates
+    // an implicit context before NVBit is ready, breaking context tracking.
+    cudaMallocManaged(&g_channel_dev, sizeof(ChannelDev));
 
     g_receiver_running = true;
     g_channel_host.init(0, CHANNEL_SIZE, g_channel_dev,

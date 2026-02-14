@@ -51,6 +51,10 @@ struct Args {
     #[arg(long, default_value = "32")]
     lookahead: usize,
 
+    /// Skip kernel name check (for comparing different kernel variants)
+    #[arg(long)]
+    force: bool,
+
     /// Site mapping file (prlx-sites.json) for source location information
     #[arg(long = "map")]
     site_map: Option<PathBuf>,
@@ -143,6 +147,7 @@ fn main() -> Result<()> {
         compare_values: args.values,
         max_divergences: args.max_divergences,
         lookahead_window: args.lookahead,
+        force: args.force,
     };
 
     let result = diff_traces_with_remap(&trace_a, &trace_b, &config, remapper.as_ref())?;
@@ -184,6 +189,7 @@ fn run_session_diff(args: &Args) -> Result<()> {
         compare_values: args.values,
         max_divergences: args.max_divergences,
         lookahead_window: args.lookahead,
+        force: args.force,
     };
 
     let session_result = diff_session(&session_a, &session_b, &config);

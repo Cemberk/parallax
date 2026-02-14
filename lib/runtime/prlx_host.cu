@@ -542,6 +542,15 @@ extern "C" void prlx_session_end(void) {
     session_entry_count = 0;
 }
 
+// Getters for Python FFI — expose device pointers so the module binder
+// can write them into Triton JIT-compiled CUmodules via CUDA Driver API.
+extern "C" void* prlx_get_trace_buffer(void)      { return d_trace_buffer; }
+extern "C" void* prlx_get_history_buffer(void)     { return d_history_buffer; }
+extern "C" uint32_t prlx_get_history_depth(void)   { return history_depth; }
+extern "C" uint32_t prlx_get_sample_rate(void)     { return sample_rate; }
+extern "C" void* prlx_get_snapshot_buffer(void)    { return d_snapshot_buffer; }
+extern "C" uint32_t prlx_get_snapshot_depth(void)  { return snapshot_depth; }
+
 // Cleanup
 extern "C" void prlx_shutdown(void) {
     if (d_trace_buffer) {

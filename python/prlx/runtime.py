@@ -48,6 +48,24 @@ class PrlxRuntime:
         self._lib.prlx_session_end.restype = None
         self._lib.prlx_session_end.argtypes = []
 
+        self._lib.prlx_get_trace_buffer.restype = ctypes.c_void_p
+        self._lib.prlx_get_trace_buffer.argtypes = []
+
+        self._lib.prlx_get_history_buffer.restype = ctypes.c_void_p
+        self._lib.prlx_get_history_buffer.argtypes = []
+
+        self._lib.prlx_get_history_depth.restype = ctypes.c_uint32
+        self._lib.prlx_get_history_depth.argtypes = []
+
+        self._lib.prlx_get_sample_rate.restype = ctypes.c_uint32
+        self._lib.prlx_get_sample_rate.argtypes = []
+
+        self._lib.prlx_get_snapshot_buffer.restype = ctypes.c_void_p
+        self._lib.prlx_get_snapshot_buffer.argtypes = []
+
+        self._lib.prlx_get_snapshot_depth.restype = ctypes.c_uint32
+        self._lib.prlx_get_snapshot_depth.argtypes = []
+
     def init(self):
         self._lib.prlx_init()
         self._initialized = True
@@ -70,6 +88,24 @@ class PrlxRuntime:
 
     def session_end(self):
         self._lib.prlx_session_end()
+
+    def get_trace_buffer(self) -> int:
+        return self._lib.prlx_get_trace_buffer() or 0
+
+    def get_history_buffer(self) -> int:
+        return self._lib.prlx_get_history_buffer() or 0
+
+    def get_history_depth(self) -> int:
+        return self._lib.prlx_get_history_depth()
+
+    def get_sample_rate(self) -> int:
+        return self._lib.prlx_get_sample_rate()
+
+    def get_snapshot_buffer(self) -> int:
+        return self._lib.prlx_get_snapshot_buffer() or 0
+
+    def get_snapshot_depth(self) -> int:
+        return self._lib.prlx_get_snapshot_depth()
 
     def shutdown(self):
         self._lib.prlx_shutdown()
