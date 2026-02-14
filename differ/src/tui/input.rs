@@ -35,7 +35,6 @@ pub fn map_key(key: KeyEvent, mode: &InputMode) -> Action {
 }
 
 fn map_normal_key(key: KeyEvent) -> Action {
-    // Handle Ctrl combinations first.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Action::Quit,

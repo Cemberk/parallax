@@ -1,15 +1,5 @@
-// Scenario 3: The "Shared Memory Hazard" Test
-//
-// This tests whether branch divergence can catch data corruption bugs.
-// A tiled matrix multiplication kernel with a shared memory indexing bug.
-//
-// The Bug: One thread writes to the wrong shared memory index
-// The Effect: Other threads read corrupted data, causing branch divergence
-//
-// Expected behavior:
-//   - The differ should detect branch divergence in the computation loop
-//   - This validates that even without explicit shared memory tracing,
-//     the tool can catch data-dependent bugs via their control flow effects
+// Tiled matmul with a shared memory indexing bug.
+// Demonstrates catching data corruption via branch divergence.
 
 #include "../../lib/runtime/prlx_runtime.h"
 #include <cuda_runtime.h>
@@ -115,20 +105,16 @@ int main(int argc, char** argv) {
     printf("  Run B: PRLX_TRACE=trace_b.prlx ./matmul_divergence buggy\n");
     printf("  Diff:  prlx diff trace_a.prlx trace_b.prlx\n\n");
 
-    // Initialize runtime
     prlx_init();
 
-    // Allocate host matrices
     float *h_A = new float[M * K];
     float *h_B = new float[K * N];
     float *h_C = new float[M * N];
 
-    // Initialize matrices with random values
-    srand(42);  // Fixed seed for reproducibility
+    srand(42);
     init_matrix(h_A, M, K, 2.0f);
     init_matrix(h_B, K, N, 2.0f);
 
-    // Allocate device matrices
     float *d_A, *d_B, *d_C;
     cudaMalloc(&d_A, M * K * sizeof(float));
     cudaMalloc(&d_B, K * N * sizeof(float));

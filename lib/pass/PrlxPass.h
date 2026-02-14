@@ -17,54 +17,28 @@ public:
     llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager& AM);
 
 private:
-    // Check if this is an NVPTX module (device code)
     bool isNVPTXModule(const llvm::Module& M) const;
-
-    // Check if a function is a device function
     bool isDeviceFunction(const llvm::Function& F) const;
-
-    // Check if a function matches the user's filter pattern
-    // Returns true if the function should be instrumented
     bool matchesFilter(const llvm::Function& F) const;
 
-    // Simple glob matching: supports '*' wildcard
     static bool globMatch(const std::string& pattern, const std::string& text);
-
-    // Load filter patterns from environment or command-line option
     void loadFilters();
 
-    // Declare runtime recording functions in the module
     void declareRuntimeFunctions(llvm::Module& M);
-
-    // Declare the global device variable for trace buffer pointer
     void declareTraceBufferGlobal(llvm::Module& M);
-
-    // Instrument a conditional branch
     void instrumentBranch(llvm::BranchInst* BI, SiteTable& siteTable, llvm::Module& M);
-
-    // Instrument a shared memory store
     void instrumentSharedMemStore(llvm::StoreInst* SI, SiteTable& siteTable, llvm::Module& M);
-
-    // Instrument an atomic operation
     void instrumentAtomic(llvm::AtomicRMWInst* AI, SiteTable& siteTable, llvm::Module& M);
-
-    // Instrument a compare-exchange atomic
     void instrumentCmpXchg(llvm::AtomicCmpXchgInst* CI, SiteTable& siteTable, llvm::Module& M);
-
-    // Instrument value captures for loads feeding branch conditions (time-travel)
     void instrumentValueCaptures(llvm::BranchInst* BI, SiteTable& siteTable, llvm::Module& M);
 
-    // Instrument predicated comparisons (Triton's pattern: icmp/fcmp feeding
-    // inline asm predicates instead of branches). Semantically equivalent to
-    // branch instrumentation.
+    // Triton's pattern: icmp/fcmp feeding inline asm predicates instead of
+    // branches. Semantically equivalent to branch instrumentation.
     void instrumentPredicatedOps(std::vector<llvm::CmpInst*>& predicates,
                                  SiteTable& siteTable, llvm::Module& M);
 
-    // Instrument a snapshot (per-lane operand capture) at a comparison site
     void instrumentSnapshot(llvm::CmpInst* CI, uint32_t site_id,
                            llvm::IRBuilder<>& Builder, llvm::Module& M);
-
-    // Embed site table as global constant in the module
     void embedSiteTable(llvm::Module& M, const SiteTable& siteTable);
 
     // Runtime function declarations (cached)

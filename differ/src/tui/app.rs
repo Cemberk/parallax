@@ -60,7 +60,6 @@ impl App {
         let num_warps = diff_result.total_warps;
         let total_divergences = diff_result.divergences.len();
 
-        // Build per-warp summaries from DiffResult.
         let mut div_counts: std::collections::HashMap<u32, usize> =
             std::collections::HashMap::new();
         for div in &diff_result.divergences {
@@ -80,7 +79,6 @@ impl App {
             });
         }
 
-        // Start on the first warp that has divergences (or warp 0).
         let start_warp = divergent_warp_indices
             .first()
             .map(|&idx| warp_summaries[idx].warp_idx)
@@ -197,7 +195,6 @@ impl App {
 
     fn next_divergence(&mut self) {
         let view = self.aligned.warp_view(self.current_warp);
-        // Find the next divergence index after selected_row in this warp.
         let next_in_warp = view
             .divergence_indices
             .iter()
@@ -207,7 +204,6 @@ impl App {
             self.selected_row = idx;
             self.clamp_scroll();
         } else {
-            // Jump to the next warp that has divergences.
             let cur_warp_pos = self
                 .divergent_warp_indices
                 .iter()
@@ -229,7 +225,6 @@ impl App {
                 self.current_warp = warp_idx;
                 self.scroll_offset = 0;
                 self.selected_row = 0;
-                // Jump to the first divergence in that warp.
                 let view = self.aligned.warp_view(warp_idx);
                 if let Some(&first) = view.divergence_indices.first() {
                     self.selected_row = first;
@@ -241,7 +236,6 @@ impl App {
 
     fn prev_divergence(&mut self) {
         let view = self.aligned.warp_view(self.current_warp);
-        // Find the previous divergence index before selected_row.
         let prev_in_warp = view
             .divergence_indices
             .iter()
@@ -252,7 +246,6 @@ impl App {
             self.selected_row = idx;
             self.clamp_scroll();
         } else {
-            // Jump to the previous warp with divergences.
             let cur_warp_pos = self
                 .divergent_warp_indices
                 .iter()
@@ -273,7 +266,6 @@ impl App {
                 self.current_warp = warp_idx;
                 self.scroll_offset = 0;
                 self.selected_row = 0;
-                // Jump to the last divergence in that warp.
                 let view = self.aligned.warp_view(warp_idx);
                 if let Some(&last) = view.divergence_indices.last() {
                     self.selected_row = last;
@@ -301,7 +293,6 @@ impl App {
 
     /// Count which divergence number the current selection is (1-based), or 0.
     pub fn current_div_position(&mut self) -> (usize, usize) {
-        // Count all divergences across all warps up to current position.
         let mut global_pos = 0usize;
         for ws in &self.warp_summaries {
             if ws.warp_idx < self.current_warp {

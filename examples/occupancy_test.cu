@@ -1,16 +1,4 @@
-// Scenario 2: The "Occupancy" Test
-//
-// This tests the tool's behavior under heavy load:
-//   1. Memory pressure: Can it handle large grid sizes without OOM?
-//   2. Buffer overflow: Do the circular buffers work correctly?
-//   3. Performance: Does instrumentation cause TDR (timeout)?
-//
-// Expected behavior:
-//   - Should complete without crashing
-//   - Overflow counters should be non-zero for warps with >4096 events
-//   - Execution time should be reasonable (<30s even with instrumentation)
-//
-// This validates production readiness on large-scale GPU workloads.
+// Stress test: large grid, many events per warp, circular buffer overflow.
 
 #include "../../lib/runtime/prlx_runtime.h"
 #include <cuda_runtime.h>
@@ -130,14 +118,10 @@ int main(int argc, char** argv) {
     print_memory_info();
     printf("\n");
 
-    // Initialize runtime
     prlx_init();
 
-    // Allocate host data
     int* h_data = new int[N];
     int* h_out = new int[N];
-
-    // Initialize data
     for (int i = 0; i < N; i++) {
         h_data[i] = i % 1000;
     }

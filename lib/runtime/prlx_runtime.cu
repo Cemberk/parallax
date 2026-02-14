@@ -23,25 +23,17 @@ __device__ uint32_t g_prlx_snapshot_depth = 0;
 
 // Compute linear warp ID within the grid
 __device__ __forceinline__ uint32_t __prlx_warp_id() {
-    // Thread ID within block
     uint32_t tid = threadIdx.x + threadIdx.y * blockDim.x
                  + threadIdx.z * blockDim.x * blockDim.y;
-
-    // Warp ID within block (each warp has 32 threads)
     uint32_t warp_in_block = tid / 32;
-
-    // Linear block ID
     uint32_t linear_block = blockIdx.x
                           + blockIdx.y * gridDim.x
                           + blockIdx.z * gridDim.x * gridDim.y;
-
-    // Warps per block
     uint32_t warps_per_block = (blockDim.x * blockDim.y * blockDim.z + 31) / 32;
 
     return linear_block * warps_per_block + warp_in_block;
 }
 
-// Get lane ID within warp (0-31)
 __device__ __forceinline__ uint32_t __prlx_lane_id() {
     uint32_t lane;
     asm("mov.u32 %0, %%laneid;" : "=r"(lane));
@@ -78,10 +70,8 @@ extern "C" __device__ void __prlx_record_branch(
     // Only lane 0 of each warp records the event to avoid redundant writes
     if (__prlx_lane_id() != 0) return;
 
-    // Check ROI toggle - skip if user has disabled recording
     if (!__prlx_recording_enabled) return;
 
-    // Check if tracing is enabled (buffer pointer is non-null)
     TraceBuffer* buf = g_prlx_buffer;
     if (buf == nullptr) return;
 
@@ -99,10 +89,7 @@ extern "C" __device__ void __prlx_record_branch(
     header->total_event_count = evt_count + 1;
     if (__prlx_sample_rate > 1 && (evt_count % __prlx_sample_rate) != 0) return;
 
-    // Atomically increment write index
     uint32_t idx = atomicAdd(&header->write_idx, 1);
-
-    // Check for buffer overflow
     if (idx >= PRLX_EVENTS_PER_WARP) {
         atomicAdd(&header->overflow_count, 1);
         return;
@@ -112,7 +99,6 @@ extern "C" __device__ void __prlx_record_branch(
     // Do NOT hash or compress this value (Death Valley 1)
     uint32_t active_mask = __activemask();
 
-    // Build event
     TraceEvent evt;
     evt.site_id = site_id;
     evt.event_type = EVENT_BRANCH;
@@ -121,7 +107,6 @@ extern "C" __device__ void __prlx_record_branch(
     evt.active_mask = active_mask;
     evt.value_a = operand_a;
 
-    // Store with cache bypass
     __prlx_store_event(&events[idx], evt);
 }
 
@@ -260,7 +245,6 @@ extern "C" __device__ void __prlx_record_value(
     if (__prlx_lane_id() != 0) return;
     if (!__prlx_recording_enabled) return;
 
-    // Check if history is enabled
     char* hist_buf = g_prlx_history_buffer;
     if (hist_buf == nullptr) return;
 
@@ -275,21 +259,19 @@ extern "C" __device__ void __prlx_record_value(
     HistoryRingHeader* ring = (HistoryRingHeader*)ring_base;
     HistoryEntry* entries = (HistoryEntry*)(ring_base + sizeof(HistoryRingHeader));
 
-    // Circular write: atomically increment and wrap
+    // Circular write
     uint32_t raw_idx = atomicAdd(&ring->write_idx, 1);
     uint32_t slot = raw_idx % depth;
 
     // Track total writes for ordering (also used to detect wrap)
     uint32_t seq = atomicAdd(&ring->total_writes, 1);
 
-    // Build history entry
     HistoryEntry entry;
     entry.site_id = site_id;
     entry.value = value;
     entry.seq = seq;
     entry._pad = 0;
 
-    // Store with cache bypass
     __prlx_store_16b(&entries[slot], reinterpret_cast<const uint32_t*>(&entry));
 }
 
@@ -346,7 +328,6 @@ extern "C" __device__ void __prlx_record_snapshot(
 
     uint32_t seq = atomicAdd(&ring->total_writes, 1);
 
-    // Build snapshot entry
     SnapshotEntry entry;
     entry.site_id = site_id;
     entry.active_mask = active;

@@ -55,7 +55,6 @@ impl TraceFile {
             );
         }
 
-        // Parse header to check for compression
         let header: TraceFileHeader = *from_bytes(&mmap[..header_size]);
 
         if header.magic != PRLX_MAGIC {
@@ -95,12 +94,10 @@ impl TraceFile {
     fn from_data(backing: TraceData, header: TraceFileHeader) -> Result<Self> {
         let data = backing.as_bytes();
 
-        // Calculate buffer layout
         let warp_buffer_size = std::mem::size_of::<WarpBufferHeader>()
             + header.events_per_warp as usize * std::mem::size_of::<TraceEvent>();
         let expected_size = header.expected_file_size();
 
-        // Validate data size
         if data.len() < expected_size {
             bail!(
                 "Data too small: {} bytes (expected {} bytes for {} warps)",
@@ -149,11 +146,9 @@ impl TraceFile {
 
         let warp_data = &self.data()[warp_offset..warp_end];
 
-        // Parse header
         let header: &WarpBufferHeader =
             from_bytes(&warp_data[..std::mem::size_of::<WarpBufferHeader>()]);
 
-        // Parse events (zero-copy slice cast)
         let events_data = &warp_data[std::mem::size_of::<WarpBufferHeader>()..];
         let events: &[TraceEvent] = try_cast_slice(events_data)
             .map_err(|e| anyhow!("Failed to cast events data: {}", e))?;
@@ -226,11 +221,9 @@ impl TraceFile {
 
         let ring_data = &self.data()[warp_ring_offset..warp_ring_end];
 
-        // Parse ring header
         let ring_header: &HistoryRingHeader =
             from_bytes(&ring_data[..std::mem::size_of::<HistoryRingHeader>()]);
 
-        // Parse entries
         let entries_data = &ring_data[std::mem::size_of::<HistoryRingHeader>()..];
         let entries: &[HistoryEntry] = try_cast_slice(entries_data)
             .map_err(|e| anyhow!("Failed to cast history entries: {}", e))?;
@@ -335,10 +328,8 @@ impl TraceFile {
                     return Ok(Vec::new());
                 }
 
-                // How many valid entries?
                 let valid_count = total.min(depth);
 
-                // Collect valid entries and sort by seq
                 let mut ordered: Vec<HistoryEntry> = if total <= depth {
                     // Ring hasn't wrapped - entries [0..total) are valid
                     entries[..valid_count].to_vec()

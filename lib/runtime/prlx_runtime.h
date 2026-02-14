@@ -113,7 +113,6 @@ extern "C" {
 #else
 // Compiling with regular C++ compiler - host-side only
 
-// Forward declaration of device symbol
 extern __device__ TraceBuffer* g_prlx_buffer;
 
 #ifdef __cplusplus

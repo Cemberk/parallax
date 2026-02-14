@@ -40,18 +40,15 @@ void TraceWriter::set_kernel_info(
 }
 
 bool TraceWriter::write(const std::string& path, bool compress) {
-    // Calculate total warp slots
     uint32_t max_warp_id = 0;
     for (auto& [warp_id, _] : warp_events_) {
         if (warp_id > max_warp_id) max_warp_id = warp_id;
     }
     uint32_t total_warp_slots = warp_events_.empty() ? 0 : max_warp_id + 1;
 
-    // Calculate warps per block
     uint32_t threads_per_block = block_dim_[0] * block_dim_[1] * block_dim_[2];
     uint32_t warps_per_block = (threads_per_block + 31) / 32;
 
-    // Build header
     TraceFileHeader header;
     memset(&header, 0, sizeof(header));
     header.magic = PRLX_MAGIC;
@@ -87,17 +84,12 @@ bool TraceWriter::write(const std::string& path, bool compress) {
 
     header.cuda_arch = cuda_arch_;
 
-    // Calculate buffer sizes
     size_t warp_buffer_size = sizeof(WarpBufferHeader) + events_per_warp_ * sizeof(TraceEvent);
     size_t total_size = sizeof(TraceFileHeader) + total_warp_slots * warp_buffer_size;
 
-    // Allocate and zero-fill the output buffer
     std::vector<uint8_t> buffer(total_size, 0);
-
-    // Write header
     memcpy(buffer.data(), &header, sizeof(header));
 
-    // Write per-warp buffers
     for (uint32_t w = 0; w < total_warp_slots; w++) {
         size_t warp_offset = sizeof(TraceFileHeader) + w * warp_buffer_size;
 
@@ -115,7 +107,6 @@ bool TraceWriter::write(const std::string& path, bool compress) {
 
             memcpy(buffer.data() + warp_offset, &warp_hdr, sizeof(warp_hdr));
 
-            // Convert channel events to TraceEvents
             for (uint32_t e = 0; e < num_events; e++) {
                 const auto& ch_evt = wb.events[e];
                 TraceEvent trace_evt;
@@ -135,7 +126,6 @@ bool TraceWriter::write(const std::string& path, bool compress) {
         }
     }
 
-    // Write to file (optionally compressed)
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) {
         fprintf(stderr, "[prlx-nvbit] Failed to open %s for writing\n", path.c_str());

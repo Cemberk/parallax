@@ -1,15 +1,4 @@
-"""
-PRLX CLI — entry point for the GPU differential debugger toolkit.
-
-Installed as ``prlx`` console script via pip.
-
-Commands:
-    prlx diff <trace_a> <trace_b> [options]    Compare two traces
-    prlx run <binary> [args]                   Run with tracing enabled
-    prlx check <binary> [args]                 Run twice and auto-diff
-    prlx compile <source.cu> -o <binary>       Compile with instrumentation
-    prlx triton --info                         Show Triton integration status
-"""
+"""PRLX CLI — console entry point for the GPU differential debugger."""
 
 import argparse
 import os
@@ -20,10 +9,6 @@ import tempfile
 from pathlib import Path
 
 from . import _find_lib
-
-# ---------------------------------------------------------------------------
-# Banner
-# ---------------------------------------------------------------------------
 
 PRLX_VERSION = "0.1.0"
 
@@ -40,7 +25,6 @@ PRLX — GPU Differential Debugger
 
 
 def _detect_gpu():
-    """Detect the NVIDIA GPU name and SM architecture via nvidia-smi."""
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name,compute_cap",
@@ -69,12 +53,7 @@ def print_banner():
     print(banner, file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# Site map auto-discovery
-# ---------------------------------------------------------------------------
-
 def find_site_map(search_dir=None):
-    """Find the prlx-sites.json file by searching common locations."""
     if search_dir is None:
         search_dir = Path.cwd()
     else:
@@ -100,12 +79,7 @@ def find_site_map(search_dir=None):
     return None
 
 
-# ---------------------------------------------------------------------------
-# GPU / Compiler helpers
-# ---------------------------------------------------------------------------
-
 def detect_gpu_arch():
-    """Detect the highest GPU compute capability available via nvidia-smi."""
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=compute_cap",
@@ -126,7 +100,6 @@ def detect_gpu_arch():
 
 
 def find_clang_for_pass(pass_lib):
-    """Find the clang version matching the LLVM pass library."""
     if pass_lib is None or not pass_lib.exists():
         return None, None
 
@@ -164,11 +137,7 @@ def find_clang_for_pass(pass_lib):
 
 
 def find_best_ptxas_arch(gpu_cc):
-    """Find the best arch that ptxas supports for the detected GPU.
-
-    Falls back to SM 90 if nvcc is unavailable or the GPU arch
-    cannot be determined from nvcc --list-gpu-arch.
-    """
+    # Falls back to SM 90 if nvcc is unavailable
     try:
         result = subprocess.run(
             ["nvcc", "--list-gpu-arch"],
@@ -193,12 +162,7 @@ def find_best_ptxas_arch(gpu_cc):
     return 90
 
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
-
 def cmd_diff(args):
-    """Run the differ on two trace files."""
     trace_a = Path(args.trace_a)
     trace_b = Path(args.trace_b)
 
@@ -218,7 +182,6 @@ def cmd_diff(args):
         )
         return 1
 
-    # Find site map if not provided
     site_map = None
     if args.map:
         site_map = Path(args.map)
@@ -254,7 +217,6 @@ def cmd_diff(args):
 
 
 def cmd_run(args):
-    """Run a binary with tracing enabled."""
     binary = Path(args.binary)
 
     if not binary.exists():
@@ -282,7 +244,6 @@ def cmd_run(args):
 
 
 def cmd_check(args):
-    """Run a binary twice and automatically diff the traces."""
     binary = Path(args.binary)
 
     if not binary.exists():
@@ -339,14 +300,12 @@ def cmd_check(args):
 
 
 def cmd_compile(args):
-    """Compile a CUDA source file with LLVM pass instrumentation."""
     source = Path(args.source)
 
     if not source.exists():
         print(f"Error: Source file not found: {source}", file=sys.stderr)
         return 1
 
-    # Find LLVM pass via discovery
     pass_lib = _find_lib.find_pass_plugin()
     if not pass_lib:
         print(
@@ -356,7 +315,6 @@ def cmd_compile(args):
         )
         return 1
 
-    # Find matching clang
     clang, llvm_ver = find_clang_for_pass(pass_lib)
     if not clang:
         print("Error: No matching clang found for LLVM pass.", file=sys.stderr)
@@ -364,7 +322,6 @@ def cmd_compile(args):
               "(e.g., apt install clang-20).", file=sys.stderr)
         return 1
 
-    # Detect GPU architecture
     gpu_cc = detect_gpu_arch()
     ptxas_arch = find_best_ptxas_arch(gpu_cc) if gpu_cc else 90
 
@@ -378,13 +335,11 @@ def cmd_compile(args):
     else:
         output = source.stem
 
-    # Find include directories via discovery
     include_dirs = _find_lib.find_include_dirs()
     if not include_dirs:
         print("Warning: Could not find prlx headers. "
               "Compilation may fail.", file=sys.stderr)
 
-    # Build unified source wrapper
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".cu", delete=False, prefix="prlx_unified_"
     ) as f:
@@ -435,7 +390,6 @@ def cmd_compile(args):
 
 
 def cmd_triton(args):
-    """Triton/Python integration management."""
     if args.info or args.check_env:
         print("=== PRLX Triton Integration ===")
 
@@ -517,10 +471,6 @@ def cmd_triton(args):
     print("  prlx triton script.py        Run script with instrumentation")
     return 0
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     print_banner()

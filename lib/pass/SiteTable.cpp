@@ -16,7 +16,6 @@ std::string SourceLocation::toString() const {
 SourceLocation SiteTable::getSourceLocation(const llvm::Instruction* I) const {
     SourceLocation loc;
 
-    // Try to get debug location
     const llvm::DebugLoc& debugLoc = I->getDebugLoc();
     if (debugLoc) {
         loc.filename = debugLoc->getFilename().str();
@@ -29,7 +28,6 @@ SourceLocation SiteTable::getSourceLocation(const llvm::Instruction* I) const {
         loc.column = 0;
     }
 
-    // Get function name
     if (I->getParent() && I->getParent()->getParent()) {
         loc.function_name = I->getParent()->getParent()->getName().str();
     } else {
@@ -59,7 +57,6 @@ uint32_t SiteTable::getSiteId(const llvm::Instruction* I, uint8_t event_type) {
     std::string ordinal_key = loc.function_name + ":" + std::to_string(event_type);
     uint32_t ordinal = ordinal_counters_[ordinal_key]++;
 
-    // Create deterministic hash of source location
     std::ostringstream oss;
     if (loc.line == 0 && loc.column == 0) {
         // No debug info: use function:event_type:ordinal for stability
@@ -73,7 +70,6 @@ uint32_t SiteTable::getSiteId(const llvm::Instruction* I, uint8_t event_type) {
     std::string location_str = oss.str();
     uint32_t site_id = fnv1a_hash(location_str);
 
-    // Record new site
     SiteInfo info;
     info.site_id = site_id;
     info.location = loc;
@@ -103,7 +99,6 @@ bool SiteTable::exportToJSON(const std::string& filename) const {
         return false;
     }
 
-    // Write JSON array
     OS << "[\n";
     for (size_t i = 0; i < sites_.size(); ++i) {
         const SiteInfo& site = sites_[i];

@@ -98,7 +98,6 @@ static void receiver_thread_func() {
     size_t recv_buffer_size = 0;
 
     while (g_receiver_running) {
-        // Receive events from channel
         uint32_t num_recv_bytes = g_channel_host.recv(recv_buffer, recv_buffer_size);
 
         if (num_recv_bytes > 0) {
@@ -116,7 +115,6 @@ static void receiver_thread_func() {
                 }
             }
         } else {
-            // No events, sleep briefly
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     }
@@ -140,13 +138,9 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
     if (g_instrumented.count(func)) return;
     g_instrumented.insert(func);
 
-    // Get function name
     const char* func_name = nvbit_get_func_name(ctx, func, true);
-
-    // Apply filter
     if (!matches_filter(func_name)) return;
 
-    // Get SASS instructions
     const std::vector<Instr*>& instrs = nvbit_get_instrs(ctx, func);
     if (instrs.empty()) return;
 
@@ -156,7 +150,6 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
         const char* opcode = instr->getOpcode();
         uint32_t sass_pc = instr->getOffset();
 
-        // Get line info for site table
         const char* filename = "";
         uint32_t line = 0;
         // NVBit provides line info via the instruction's debug info
@@ -165,7 +158,6 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
         uint8_t event_type = 255; // sentinel
 
         if (first_instr) {
-            // Function entry
             event_type = PRLX_EVENT_FUNC_ENTRY;
             uint32_t site_id = g_site_table.register_site(
                 sass_pc, event_type, filename, func_name, line);
@@ -220,7 +212,6 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
 // ---- NVBit callbacks ----
 
 void nvbit_tool_init() {
-    // Read configuration from environment
     if (const char* v = getenv("PRLX_ENABLED")) {
         g_config.enabled = (atoi(v) != 0);
     }
@@ -256,13 +247,9 @@ void nvbit_tool_init() {
             g_config.buffer_size,
             g_config.filter_pattern.c_str());
 
-    // Create trace writer
     g_writer = new prlx::TraceWriter(g_config.buffer_size);
-
-    // Initialize NVBit channel
     g_channel_host.init(0, nullptr, sizeof(prlx_channel_event_t), 1 << 20);
 
-    // Start receiver thread
     g_receiver_running = true;
     g_receiver_thread = new std::thread(receiver_thread_func);
 
@@ -273,7 +260,6 @@ void nvbit_tool_init() {
 void nvbit_tool_exit() {
     if (!g_config.enabled) return;
 
-    // Stop receiver thread
     g_receiver_running = false;
     if (g_receiver_thread) {
         g_receiver_thread->join();
@@ -284,13 +270,11 @@ void nvbit_tool_exit() {
     // Flush any remaining events
     g_channel_host.stop();
 
-    // Write trace file
     if (g_writer && g_writer->total_events() > 0) {
         std::lock_guard<std::mutex> lock(g_writer_mutex);
         g_writer->write(g_config.trace_path, g_config.compress);
     }
 
-    // Export site table
     if (g_site_table.size() > 0) {
         g_site_table.export_json(g_config.sites_path);
     }
@@ -320,10 +304,8 @@ void nvbit_at_cuda_event(
             // Pre-launch: instrument the function and set up tracing
             instrument_function(ctx, p->f);
 
-            // Set kernel metadata
             const char* kernel_name = nvbit_get_func_name(ctx, p->f, true);
 
-            // Get device SM version
             int dev = 0;
             CUdevice cu_dev;
             cuCtxGetDevice(&cu_dev);
@@ -343,10 +325,8 @@ void nvbit_at_cuda_event(
                 }
             }
 
-            // Increment grid launch ID
             g_grid_launch_id++;
 
-            // Set device globals
             int enabled_val = 1;
             cudaMemcpyToSymbol(prlx_enabled, &enabled_val, sizeof(int));
             cudaMemcpyToSymbol(prlx_grid_launch_id, &g_grid_launch_id, sizeof(uint64_t));

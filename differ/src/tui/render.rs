@@ -46,7 +46,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(main_chunks[0]);
 
-    // Update terminal height for page calculations.
     app.terminal_height = area.height;
 
     draw_event_pane(frame, app, trace_chunks[0], PaneSide::Left);
@@ -112,13 +111,11 @@ fn format_event_line(row: &AlignedRow, side: PaneSide, is_selected: bool, width:
         Some(e) => {
             let mut spans = Vec::new();
 
-            // Row index.
             spans.push(Span::styled(
                 format!("{:>4} ", row.row_idx),
                 Style::default().fg(Color::DarkGray),
             ));
 
-            // Event type badge.
             let type_str = event_type_short(e.event_type);
             let type_color = match e.event_type {
                 0 => Color::Yellow,  // BRN
@@ -133,13 +130,11 @@ fn format_event_line(row: &AlignedRow, side: PaneSide, is_selected: bool, width:
                 Style::default().fg(type_color),
             ));
 
-            // Site ID.
             spans.push(Span::styled(
                 format!("{:08x} ", e.site_id),
                 Style::default().fg(Color::Cyan),
             ));
 
-            // Branch direction (for branch events).
             if e.event_type == 0 {
                 let dir_str = if e.branch_dir == 0 { "NT" } else { "TK" };
                 spans.push(Span::styled(
@@ -148,13 +143,11 @@ fn format_event_line(row: &AlignedRow, side: PaneSide, is_selected: bool, width:
                 ));
             }
 
-            // Active mask (compact).
             spans.push(Span::styled(
                 format!("m:{:08x} ", e.active_mask),
                 Style::default().fg(Color::DarkGray),
             ));
 
-            // Source location (if space allows).
             if width > 50 {
                 if let Some(ref loc) = e.source_loc {
                     spans.push(Span::styled(
@@ -336,7 +329,6 @@ fn format_detail(row: &AlignedRow) -> Vec<Line<'static>> {
         return lines;
     }
 
-    // Show divergence details.
     for div in &row.divergences {
         match div {
             RowDivergence::Branch { dir_a, dir_b } => {
@@ -445,7 +437,6 @@ fn format_detail(row: &AlignedRow) -> Vec<Line<'static>> {
         }
     }
 
-    // Show source location if available.
     if let Some(ref e) = row.event_a {
         if let Some(ref loc) = e.source_loc {
             lines.push(Line::from(vec![
@@ -574,7 +565,6 @@ fn format_snapshot_lines(lines: &mut Vec<Line<'static>>, snap: &SnapshotContext)
             .add_modifier(Modifier::BOLD),
     )));
 
-    // Header row
     lines.push(Line::from(vec![
         Span::styled("    Lane  ", Style::default().fg(Color::DarkGray)),
         Span::styled("A:lhs     ", Style::default().fg(Color::Cyan)),

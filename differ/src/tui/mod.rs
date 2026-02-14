@@ -34,7 +34,6 @@ pub fn run_tui(
     diff_result: DiffResult,
     site_map: Option<SiteMap>,
 ) -> Result<()> {
-    // Terminal setup.
     enable_raw_mode().context("Failed to enable raw mode. Is this a TTY?")?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;

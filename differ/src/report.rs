@@ -29,7 +29,6 @@ pub fn print_summary(result: &DiffResult) {
         format!("{} warps affected", result.warps_diverged).red()
     );
 
-    // Print breakdown by kind
     let by_kind = result.divergences_by_kind();
     if !by_kind.is_empty() {
         println!("\nDivergence breakdown:");
@@ -48,7 +47,6 @@ pub fn print_divergences(result: &DiffResult, max_shown: usize, site_map: Option
 
     println!("{}", "=== Divergences ===".bold());
 
-    // Group by site_id
     let by_site = result.divergences_by_site();
     let mut sites: Vec<_> = by_site.keys().collect();
     sites.sort();
@@ -62,7 +60,6 @@ pub fn print_divergences(result: &DiffResult, max_shown: usize, site_map: Option
 
         let divs = &by_site[site_id];
 
-        // Format site header with source location if available
         let site_str = if let Some(map) = site_map {
             if let Some(loc) = map.get(*site_id) {
                 format!(
@@ -134,7 +131,6 @@ fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>) {
             let diff = mask_a ^ mask_b;
             if diff != 0 {
                 println!("    → Lanes differ: 0x{:08x}", diff);
-                // Show which lanes differ
                 let mut differing_lanes = Vec::new();
                 for lane in 0..32 {
                     if (diff & (1 << lane)) != 0 {
@@ -155,7 +151,6 @@ fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>) {
         DivergenceKind::Path { site_a, site_b } => {
             println!("{}", "TRUE PATH DIVERGENCE".red().bold());
 
-            // Show site_a with source location if available
             if let Some(map) = site_map {
                 if let Some(loc) = map.get(*site_a) {
                     println!("    Trace A reached: 0x{:08x} ({})", site_a, loc.format_short().green());
@@ -186,7 +181,6 @@ fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>) {
         }
     }
 
-    // Print per-lane operand snapshot if available
     if let Some(ref snap) = div.snapshot {
         print_snapshot_context(snap);
     }
@@ -323,7 +317,6 @@ pub fn print_history_context(
             div.warp_idx
         );
 
-        // Show last N history entries for each trace
         let show_count = 8;
         let start_a = hist_a.len().saturating_sub(show_count);
         let start_b = hist_b.len().saturating_sub(show_count);

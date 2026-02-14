@@ -1,7 +1,5 @@
 #!/bin/bash
-# PRLX: One-Click Demo Runner
-# Runs all validation scenarios with LLVM pass instrumentation + snapshot capture
-#
+# Runs all demo scenarios end-to-end.
 # Usage: ./examples/run_all_demos.sh
 
 set -e
@@ -28,7 +26,6 @@ echo "PRLX: End-to-End Demo"
 echo -e "=========================================${NC}"
 echo ""
 
-# Pre-flight checks
 echo "Checking environment..."
 
 if [ ! -f "$PRLX" ]; then
@@ -41,7 +38,6 @@ if [ ! -f "$DIFFER" ]; then
     exit 1
 fi
 
-# Check that prlx compile works
 if ! python3 "$PRLX" compile --help >/dev/null 2>&1; then
     echo -e "${RED}Error: 'prlx compile' not available${NC}"
     exit 1
@@ -60,7 +56,6 @@ echo "Kernel: simple branch (value > threshold)"
 echo "Goal:   Detect different branch directions + show per-lane operands"
 echo ""
 
-# Create a simple kernel file
 cat > "$WORK_DIR/branch_demo.cu" << 'KERNEL_EOF'
 #include <cuda_runtime.h>
 #include <cstdio>

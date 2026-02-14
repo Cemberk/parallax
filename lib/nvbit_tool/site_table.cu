@@ -25,7 +25,6 @@ uint32_t NvbitSiteTable::register_site(
     const std::string& filename, const std::string& function,
     uint32_t line
 ) {
-    // Check if already registered
     auto it = pc_to_site_.find(sass_pc);
     if (it != pc_to_site_.end()) {
         return it->second;
@@ -52,7 +51,6 @@ uint32_t NvbitSiteTable::register_site(
 
     uint32_t site_id = fnv1a_hash(hash_key);
 
-    // Store mapping
     pc_to_site_[sass_pc] = site_id;
 
     NvbitSourceLoc loc;

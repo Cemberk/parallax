@@ -87,12 +87,10 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Session mode: compare two session directories
     if args.session {
         return run_session_diff(&args);
     }
 
-    // Load trace files
     println!("Loading traces...");
     let trace_a = TraceFile::open(&args.trace_a)
         .with_context(|| format!("Failed to load trace A: {}", args.trace_a.display()))?;
@@ -100,7 +98,6 @@ fn main() -> Result<()> {
     let trace_b = TraceFile::open(&args.trace_b)
         .with_context(|| format!("Failed to load trace B: {}", args.trace_b.display()))?;
 
-    // Load site map if provided
     let site_map = if let Some(map_path) = &args.site_map {
         Some(
             SiteMap::load(map_path)
@@ -114,13 +111,11 @@ fn main() -> Result<()> {
         println!("Loaded {} site mappings\n", map.len());
     }
 
-    // Print trace information
     if args.verbose {
         print_trace_info("Trace A", &trace_a);
         print_trace_info("Trace B", &trace_b);
     }
 
-    // Dump mode (debugging)
     if let Some(n) = args.dump_a {
         dump_trace("Trace A", &trace_a, n);
         return Ok(());
@@ -130,7 +125,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Build site remapper if both remap maps provided
     let remapper = if let (Some(remap_a_path), Some(remap_b_path)) =
         (&args.remap_a, &args.remap_b)
     {
@@ -145,32 +139,26 @@ fn main() -> Result<()> {
         None
     };
 
-    // Create diff configuration
     let config = DiffConfig {
         compare_values: args.values,
         max_divergences: args.max_divergences,
         lookahead_window: args.lookahead,
     };
 
-    // Perform differential analysis
     let result = diff_traces_with_remap(&trace_a, &trace_b, &config, remapper.as_ref())?;
 
-    // TUI mode: launch interactive viewer
     if args.tui {
         tui::run_tui(trace_a, trace_b, result, site_map)?;
         return Ok(());
     }
 
-    // Print results
     print_summary(&result);
     print_divergences(&result, args.max_shown, site_map.as_ref());
 
-    // Print history context if requested (or auto-detect)
     if args.history || trace_a.has_history() || trace_b.has_history() {
         print_history_context(&result, &trace_a, &trace_b, args.max_shown, site_map.as_ref());
     }
 
-    // Exit with non-zero if divergences found
     if !result.is_identical() {
         std::process::exit(1);
     }
@@ -200,7 +188,6 @@ fn run_session_diff(args: &Args) -> Result<()> {
 
     let session_result = diff_session(&session_a, &session_b, &config);
 
-    // Print per-kernel results
     let mut any_diverged = false;
     for (kernel_name, launch_idx, result) in &session_result.kernel_results {
         println!("--- Kernel: {} (launch {}) ---", kernel_name, launch_idx);

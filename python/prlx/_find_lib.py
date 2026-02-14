@@ -1,11 +1,6 @@
-"""
-Library and binary discovery for prlx components.
+"""Library and binary discovery for prlx components.
 
-Search priority for each component:
-    1. PRLX_HOME env var (explicit override)
-    2. Bundled package data (inside installed wheel)
-    3. Project root fallback (development / editable install)
-    4. System PATH (for LLVM tools and prlx-diff)
+Search order: PRLX_HOME env -> bundled package data -> project root -> system PATH.
 """
 
 import os
@@ -15,16 +10,12 @@ import subprocess
 from pathlib import Path
 from typing import Optional, List
 
-# Package data directory (populated inside wheels, empty in dev mode)
 _PACKAGE_DATA = Path(__file__).resolve().parent / "data"
 
 
 def _project_root() -> Optional[Path]:
-    """Find the prlx project root (where CMakeLists.txt + differ/ live).
-
-    Returns None if not in a source tree (e.g., installed via pip).
-    """
-    current = Path(__file__).resolve().parent  # python/prlx/
+    """Walk up to find the source tree root (has CMakeLists.txt + differ/)."""
+    current = Path(__file__).resolve().parent
     for _ in range(5):
         current = current.parent
         if (current / "CMakeLists.txt").exists() and (current / "differ").exists():
@@ -33,17 +24,12 @@ def _project_root() -> Optional[Path]:
 
 
 def _detect_llvm_version() -> Optional[int]:
-    """Detect the major LLVM version available on the system.
-
-    Checks opt-20, opt-19, opt-18, opt in order and parses --version output.
-    """
     for name in ("opt-20", "opt-19", "opt-18", "opt"):
         path = shutil.which(name)
         if path:
             try:
                 result = subprocess.run(
-                    [path, "--version"],
-                    capture_output=True, text=True, timeout=5,
+                    [path, "--version"], capture_output=True, text=True, timeout=5,
                 )
                 for line in result.stdout.splitlines():
                     m = re.search(r"(\d+)\.\d+", line)
@@ -55,12 +41,7 @@ def _detect_llvm_version() -> Optional[int]:
 
 
 def find_pass_plugin() -> Optional[Path]:
-    """Find libPrlxPass.so matching the system's LLVM version.
-
-    For installed wheels, versioned variants (libPrlxPass.llvm20.so) are
-    selected based on the detected LLVM version.
-    """
-    # 1. Explicit override
+    """Find libPrlxPass.so, matching the system LLVM version for bundled installs."""
     home = os.environ.get("PRLX_HOME")
     if home:
         for p in [
@@ -70,19 +51,17 @@ def find_pass_plugin() -> Optional[Path]:
             if p.exists():
                 return p.resolve()
 
-    # 2. Bundled package data (versioned by LLVM)
+    # Bundled: pick version-matched .so
     llvm_ver = _detect_llvm_version()
     if llvm_ver:
         p = _PACKAGE_DATA / "lib" / f"libPrlxPass.llvm{llvm_ver}.so"
         if p.exists():
             return p.resolve()
 
-    # Bundled unversioned fallback
     p = _PACKAGE_DATA / "lib" / "libPrlxPass.so"
     if p.exists():
         return p.resolve()
 
-    # 3. Project root (dev mode)
     root = _project_root()
     if root:
         for build_dir in ("build-prlx", "build"):
@@ -94,7 +73,6 @@ def find_pass_plugin() -> Optional[Path]:
 
 
 def find_runtime_library() -> Optional[Path]:
-    """Find the libprlx_runtime_shared.so shared library."""
     home = os.environ.get("PRLX_HOME")
     if home:
         for p in [
@@ -119,7 +97,6 @@ def find_runtime_library() -> Optional[Path]:
 
 
 def find_static_runtime() -> Optional[Path]:
-    """Find the libprlx_runtime.a static archive."""
     home = os.environ.get("PRLX_HOME")
     if home:
         for p in [
@@ -144,7 +121,6 @@ def find_static_runtime() -> Optional[Path]:
 
 
 def find_runtime_bitcode() -> Optional[Path]:
-    """Find the NVPTX bitcode for Triton linking."""
     home = os.environ.get("PRLX_HOME")
     if home:
         for p in [
@@ -169,25 +145,16 @@ def find_runtime_bitcode() -> Optional[Path]:
 
 
 def find_include_dirs() -> List[Path]:
-    """Find directories containing prlx headers (prlx_runtime.h, trace_format.h).
-
-    Returns a list of include paths to pass to the compiler via -I.
-    """
-    # Bundled
     inc = _PACKAGE_DATA / "include"
     if inc.exists() and (inc / "trace_format.h").exists():
         return [inc]
 
-    # Project root (dev mode) — headers are in two dirs
     root = _project_root()
     if root:
         dirs = []
-        runtime_dir = root / "lib" / "runtime"
-        common_dir = root / "lib" / "common"
-        if runtime_dir.exists():
-            dirs.append(runtime_dir)
-        if common_dir.exists():
-            dirs.append(common_dir)
+        for d in (root / "lib" / "runtime", root / "lib" / "common"):
+            if d.exists():
+                dirs.append(d)
         if dirs:
             return dirs
 
@@ -195,7 +162,6 @@ def find_include_dirs() -> List[Path]:
 
 
 def find_opt_binary() -> Optional[Path]:
-    """Find opt (LLVM optimizer) for running the instrumentation pass."""
     for name in ("opt-20", "opt-19", "opt-18", "opt"):
         path = shutil.which(name)
         if path:
@@ -204,7 +170,6 @@ def find_opt_binary() -> Optional[Path]:
 
 
 def find_llvm_link_binary() -> Optional[Path]:
-    """Find llvm-link for linking NVPTX bitcode modules."""
     for name in ("llvm-link-20", "llvm-link-19", "llvm-link-18", "llvm-link"):
         path = shutil.which(name)
         if path:
@@ -213,20 +178,16 @@ def find_llvm_link_binary() -> Optional[Path]:
 
 
 def find_differ_binary() -> Optional[Path]:
-    """Find the prlx-diff Rust binary."""
-    # 1. Explicit override
     home = os.environ.get("PRLX_HOME")
     if home:
         p = Path(home) / "bin" / "prlx-diff"
         if p.exists():
             return p.resolve()
 
-    # 2. Bundled package data
     p = _PACKAGE_DATA / "bin" / "prlx-diff"
     if p.exists():
         return p.resolve()
 
-    # 3. Project root (dev mode)
     root = _project_root()
     if root:
         for variant in ("release", "debug"):
@@ -234,7 +195,6 @@ def find_differ_binary() -> Optional[Path]:
             if p.exists():
                 return p.resolve()
 
-    # 4. System PATH
     path = shutil.which("prlx-diff")
     if path:
         return Path(path)

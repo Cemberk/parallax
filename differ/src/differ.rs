@@ -126,7 +126,6 @@ pub fn diff_traces_with_remap(
     config: &DiffConfig,
     remapper: Option<&SiteRemapper>,
 ) -> Result<DiffResult> {
-    // Validate headers are compatible
     validate_traces(trace_a, trace_b)?;
 
     let header_a = trace_a.header();
@@ -134,11 +133,9 @@ pub fn diff_traces_with_remap(
 
     println!("Comparing {} warps...", header_a.total_warp_slots);
 
-    // Parallel comparison of all warps
     let all_divergences: Vec<Vec<Divergence>> = (0..header_a.total_warp_slots as usize)
         .into_par_iter()
         .map(|warp_idx| {
-            // Get events for this warp from both traces
             let (_, events_a) = match trace_a.get_warp_data(warp_idx) {
                 Ok(data) => data,
                 Err(_) => return Vec::new(),
@@ -148,7 +145,6 @@ pub fn diff_traces_with_remap(
                 Err(_) => return Vec::new(),
             };
 
-            // Apply site_id remapping to trace B if remapper is provided
             let remapped_b;
             let effective_b = if let Some(remap) = remapper {
                 remapped_b = events_b
@@ -164,12 +160,10 @@ pub fn diff_traces_with_remap(
                 events_b
             };
 
-            // Diff this warp with bounded lookahead
             diff_single_warp(warp_idx as u32, events_a, effective_b, config)
         })
         .collect();
 
-    // Flatten and potentially limit divergences
     let mut divergences: Vec<Divergence> = all_divergences.into_iter().flatten().collect();
 
     // Enrich branch/mask divergences with snapshot data (per-lane operands)
@@ -238,7 +232,6 @@ fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile) -> Result<()> {
     let header_a = trace_a.header();
     let header_b = trace_b.header();
 
-    // Check kernel hash
     if header_a.kernel_name_hash != header_b.kernel_name_hash {
         bail!(
             "Kernel mismatch: '{}' (0x{:016x}) vs '{}' (0x{:016x})",
@@ -249,7 +242,6 @@ fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile) -> Result<()> {
         );
     }
 
-    // Check grid dimensions
     if header_a.grid_dim != header_b.grid_dim {
         bail!(
             "Grid dimension mismatch: {:?} vs {:?}",
@@ -258,7 +250,6 @@ fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile) -> Result<()> {
         );
     }
 
-    // Check block dimensions
     if header_a.block_dim != header_b.block_dim {
         bail!(
             "Block dimension mismatch: {:?} vs {:?}",
@@ -267,7 +258,6 @@ fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile) -> Result<()> {
         );
     }
 
-    // Check total warps
     if header_a.total_warp_slots != header_b.total_warp_slots {
         bail!(
             "Total warp mismatch: {} vs {}",
@@ -301,7 +291,6 @@ fn diff_single_warp(
 
         // Case 1: site_ids match - compare details
         if evt_a.site_id == evt_b.site_id {
-            // Check branch direction divergence
             if evt_a.event_type == 0 && evt_a.branch_dir != evt_b.branch_dir {
                 divergences.push(Divergence {
                     warp_idx,
@@ -315,7 +304,6 @@ fn diff_single_warp(
                 });
             }
 
-            // Check active mask divergence
             if evt_a.active_mask != evt_b.active_mask {
                 divergences.push(Divergence {
                     warp_idx,
@@ -329,7 +317,6 @@ fn diff_single_warp(
                 });
             }
 
-            // Check value divergence (if enabled)
             if config.compare_values && evt_a.value_a != evt_b.value_a {
                 divergences.push(Divergence {
                     warp_idx,
@@ -343,13 +330,11 @@ fn diff_single_warp(
                 });
             }
 
-            // Advance both streams
             i_a += 1;
             i_b += 1;
         } else {
             // Case 2: site_ids differ - try bounded lookahead to detect drift
 
-            // Try to find evt_a.site_id ahead in stream B
             let mut found_in_b = None;
             for k in 1..=config.lookahead_window.min(events_b.len() - i_b) {
                 if i_b + k < events_b.len() && events_b[i_b + k].site_id == evt_a.site_id {
@@ -358,7 +343,6 @@ fn diff_single_warp(
                 }
             }
 
-            // Try to find evt_b.site_id ahead in stream A
             let mut found_in_a = None;
             for k in 1..=config.lookahead_window.min(events_a.len() - i_a) {
                 if i_a + k < events_a.len() && events_a[i_a + k].site_id == evt_b.site_id {
@@ -484,9 +468,7 @@ pub fn diff_session(
 ) -> SessionDiffResult {
     let mut kernel_results = Vec::new();
 
-    // Match launches by (kernel_name, launch_index)
     for launch_a in &session_a.launches {
-        // Find matching launch in session B
         let matching_b = session_b.launches.iter().find(|lb| {
             lb.kernel == launch_a.kernel && lb.launch == launch_a.launch
         });

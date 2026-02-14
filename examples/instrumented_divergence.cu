@@ -1,13 +1,5 @@
-// Fully instrumented divergence example
-//
-// This example manually calls __prlx_record_branch() and __prlx_record_value()
-// to simulate what the LLVM pass does automatically. This lets us test the full
-// trace pipeline without needing the pass at compile time.
-//
-// Usage:
-//   PRLX_TRACE=trace_a.prlx PRLX_HISTORY_DEPTH=64 ./instrumented_divergence 0
-//   PRLX_TRACE=trace_b.prlx PRLX_HISTORY_DEPTH=64 ./instrumented_divergence 50
-//   prlx-diff trace_a.prlx trace_b.prlx --history
+// Manual instrumentation example — calls __prlx_record_branch() directly
+// to test the trace pipeline without the LLVM pass.
 
 #include "../../lib/runtime/prlx_runtime.h"
 #include <cuda_runtime.h>

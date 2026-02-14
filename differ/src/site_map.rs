@@ -131,7 +131,6 @@ mod tests {
 
     #[test]
     fn test_load_site_map() {
-        // Create a temporary JSON file
         let json_content = r#"[
   {
     "site_id": 123,
@@ -155,22 +154,18 @@ mod tests {
         temp_file.write_all(json_content.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
-        // Load the site map
         let site_map = SiteMap::load(temp_file.path()).unwrap();
 
         assert_eq!(site_map.len(), 2);
 
-        // Check first site
         let loc1 = site_map.get(123).unwrap();
         assert_eq!(loc1.filename, "kernel.cu");
         assert_eq!(loc1.line, 42);
         assert_eq!(loc1.format_short(), "kernel.cu:42");
 
-        // Check second site
         let loc2 = site_map.get(456).unwrap();
         assert_eq!(loc2.line, 45);
 
-        // Non-existent site
         assert!(site_map.get(999).is_none());
     }
 
@@ -192,7 +187,6 @@ mod tests {
 
     #[test]
     fn test_site_remapper() {
-        // Simulate two compilations of the same kernel with different site_ids
         let json_a = r#"[
   {"site_id": 100, "filename": "k.cu", "function": "kern", "line": 0, "column": 0, "event_type": 0, "ordinal": 0},
   {"site_id": 200, "filename": "k.cu", "function": "kern", "line": 0, "column": 0, "event_type": 0, "ordinal": 1},
@@ -219,7 +213,6 @@ mod tests {
         assert_eq!(remapper.translate(999), 100);
         assert_eq!(remapper.translate(888), 200);
         assert_eq!(remapper.translate(777), 300);
-        // Unknown site_id passes through unchanged
         assert_eq!(remapper.translate(555), 555);
     }
 

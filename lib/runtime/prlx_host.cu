@@ -57,7 +57,6 @@ static uint64_t fnv1a_hash(const char* str) {
 extern "C" void prlx_init(void) {
     if (initialized) return;
 
-    // Read configuration from environment
     const char* trace_path = getenv("PRLX_TRACE");
     if (trace_path) {
         strncpy(output_path, trace_path, sizeof(output_path) - 1);
@@ -109,20 +108,17 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
     if (!initialized) prlx_init();
     if (!enabled) return;
 
-    // Calculate number of warps
     uint32_t threads_per_block = blockDim.x * blockDim.y * blockDim.z;
     uint32_t warps_per_block = (threads_per_block + 31) / 32;
     uint32_t total_blocks = gridDim.x * gridDim.y * gridDim.z;
     uint32_t total_warps = total_blocks * warps_per_block;
 
-    // Calculate buffer size
     size_t warp_buffer_size = sizeof(WarpBufferHeader) + events_per_warp * sizeof(TraceEvent);
     trace_buffer_size = sizeof(TraceFileHeader) + total_warps * warp_buffer_size;
 
     fprintf(stderr, "[prlx] Allocating trace buffer: %zu MB for %u warps\n",
             trace_buffer_size / (1024*1024), total_warps);
 
-    // Allocate device buffer
     cudaError_t err = cudaMalloc(&d_trace_buffer, trace_buffer_size);
     if (err != cudaSuccess) {
         fprintf(stderr, "[prlx] ERROR: cudaMalloc failed: %s\n", cudaGetErrorString(err));
@@ -130,10 +126,8 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
         return;
     }
 
-    // Zero the buffer
     cudaMemset(d_trace_buffer, 0, trace_buffer_size);
 
-    // Prepare file header
     TraceFileHeader header = {};
     header.magic = PRLX_MAGIC;
     header.version = PRLX_VERSION;
@@ -160,14 +154,12 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
     header.events_per_warp = events_per_warp;
     header.timestamp = time(nullptr);
 
-    // Get CUDA arch (SM version)
     int device;
     cudaGetDevice(&device);
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, device);
     header.cuda_arch = prop.major * 10 + prop.minor;
 
-    // Write header to device buffer
     cudaMemcpy(d_trace_buffer, &header, sizeof(header), cudaMemcpyHostToDevice);
 
     // Set the global device variable g_prlx_buffer to point to this buffer
@@ -183,14 +175,12 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
         return;
     }
 
-    // Set sampling rate on device
     cudaMemcpyToSymbol(__prlx_sample_rate, &sample_rate, sizeof(uint32_t));
     if (sample_rate > 1) {
         fprintf(stderr, "[prlx] Sampling rate: 1/%u (recording ~%.1f%% of events)\n",
                 sample_rate, 100.0f / sample_rate);
     }
 
-    // Allocate history ring buffer if enabled
     if (history_depth > 0) {
         size_t ring_size = sizeof(HistoryRingHeader) + history_depth * sizeof(HistoryEntry);
         history_buffer_size = total_warps * ring_size;
@@ -201,7 +191,6 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
                     cudaGetErrorString(err));
             d_history_buffer = nullptr;
             history_buffer_size = 0;
-            // Update header to remove history flag
             header.flags &= ~PRLX_FLAG_HISTORY;
             header.history_depth = 0;
             cudaMemcpy(d_trace_buffer, &header, sizeof(header), cudaMemcpyHostToDevice);
@@ -218,7 +207,6 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
             }
             free(h_ring_init);
 
-            // Set device globals (declared in prlx_runtime.h)
             cudaMemcpyToSymbol(g_prlx_history_buffer, &d_history_buffer, sizeof(void*));
             cudaMemcpyToSymbol(g_prlx_history_depth, &history_depth, sizeof(uint32_t));
 
@@ -227,7 +215,6 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
         }
     }
 
-    // Allocate snapshot ring buffer if enabled
     if (snapshot_depth > 0) {
         size_t snap_ring_size = sizeof(SnapshotRingHeader) + snapshot_depth * sizeof(SnapshotEntry);
         snapshot_buffer_size = total_warps * snap_ring_size;
@@ -238,7 +225,6 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
                     cudaGetErrorString(err));
             d_snapshot_buffer = nullptr;
             snapshot_buffer_size = 0;
-            // Remove snapshot flag from header
             header.flags &= ~PRLX_FLAG_SNAPSHOT;
             header.snapshot_depth = 0;
             cudaMemcpy(d_trace_buffer, &header, sizeof(header), cudaMemcpyHostToDevice);
@@ -272,14 +258,12 @@ extern "C" void prlx_post_launch(void) {
 
     fprintf(stderr, "[prlx] Copying trace buffer from device...\n");
 
-    // Allocate host buffer
     void* h_buffer = malloc(trace_buffer_size);
     if (!h_buffer) {
         fprintf(stderr, "[prlx] ERROR: malloc failed\n");
         return;
     }
 
-    // Copy from device to host
     cudaError_t err = cudaMemcpy(h_buffer, d_trace_buffer, trace_buffer_size,
                                   cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
@@ -305,7 +289,6 @@ extern "C" void prlx_post_launch(void) {
     fprintf(stderr, "[prlx] Recorded %lu events across %u warps (%lu overflows)\n",
             total_events, header->total_warp_slots, total_overflows);
 
-    // Copy history buffer if present
     void* h_history = nullptr;
     if (d_history_buffer && history_buffer_size > 0) {
         h_history = malloc(history_buffer_size);
@@ -332,7 +315,6 @@ extern "C" void prlx_post_launch(void) {
         }
     }
 
-    // Copy snapshot buffer if present
     void* h_snapshot = nullptr;
     if (d_snapshot_buffer && snapshot_buffer_size > 0) {
         h_snapshot = malloc(snapshot_buffer_size);
@@ -366,7 +348,6 @@ extern "C" void prlx_post_launch(void) {
         snprintf(effective_path, sizeof(effective_path), "%s/%s_%u.prlx",
                  session_dir, header->kernel_name, session_launch_count);
 
-        // Record session entry
         SessionEntry& entry = session_entries[session_entry_count];
         strncpy(entry.kernel_name, header->kernel_name, sizeof(entry.kernel_name) - 1);
         strncpy(entry.filename, effective_path, sizeof(entry.filename) - 1);
@@ -385,7 +366,6 @@ extern "C" void prlx_post_launch(void) {
     if (h_history) payload_size += history_buffer_size;
     if (h_snapshot) payload_size += snapshot_buffer_size;
 
-    // Write to file
     FILE* f = fopen(effective_path, "wb");
     if (!f) {
         fprintf(stderr, "[prlx] ERROR: cannot open output file: %s\n", effective_path);
@@ -399,14 +379,12 @@ extern "C" void prlx_post_launch(void) {
 
 #ifdef PRLX_HAS_ZSTD
     if (compress_enabled && payload_size > 0) {
-        // Set compress flag in header
         header->flags |= PRLX_FLAG_COMPRESS;
 
         // Write header (uncompressed, 160 bytes)
         fwrite(header, 1, sizeof(TraceFileHeader), f);
         total_written += sizeof(TraceFileHeader);
 
-        // Build contiguous payload buffer
         void* payload = malloc(payload_size);
         if (payload) {
             size_t off = 0;
@@ -484,7 +462,6 @@ extern "C" void prlx_post_launch(void) {
     if (h_history) free(h_history);
     if (h_snapshot) free(h_snapshot);
 
-    // Free device buffers
     cudaFree(d_trace_buffer);
     d_trace_buffer = nullptr;
 
@@ -493,7 +470,6 @@ extern "C" void prlx_post_launch(void) {
         d_history_buffer = nullptr;
         history_buffer_size = 0;
 
-        // Clear history device globals
         void* null_ptr = nullptr;
         uint32_t zero = 0;
         cudaMemcpyToSymbol(g_prlx_history_buffer, &null_ptr, sizeof(void*));
@@ -506,7 +482,6 @@ extern "C" void prlx_post_launch(void) {
         snapshot_buffer_size = 0;
     }
 
-    // Clear all device globals
     {
         void* null_ptr = nullptr;
         uint32_t zero = 0;
@@ -537,7 +512,6 @@ extern "C" void prlx_session_begin(const char* name) {
 extern "C" void prlx_session_end(void) {
     if (!session_active) return;
 
-    // Write session.json manifest
     char manifest_path[512];
     snprintf(manifest_path, sizeof(manifest_path), "%s/session.json", session_dir);
 
