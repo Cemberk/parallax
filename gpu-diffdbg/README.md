@@ -18,14 +18,30 @@ Site: 0xfbe6edc1 (2 warps affected)
       ...
 ```
 
-## Quick Start
-
-### Build
+## Installation
 
 ```bash
-cmake -B build && cmake --build build
-cd differ && cargo build --release
+pip install prlx
 ```
+
+**Requirements:** CUDA Toolkit 12.0+ and LLVM 20 (or 18) on your system.
+
+<details>
+<summary>Building from source</summary>
+
+```bash
+# Build native components
+cmake -B build && cmake --build build
+cd differ && cargo build --release && cd ..
+
+# Install in development mode
+pip install -e .
+```
+
+Requires: CMake 3.20+, LLVM/Clang 20 (or 18), CUDA Toolkit, Rust (stable).
+</details>
+
+## Quick Start
 
 ### CUDA C Kernels
 
@@ -87,13 +103,15 @@ prlx               CLI driver (compile, diff, run, check, triton)
 examples/          Demo kernels
 ```
 
-## Prerequisites
+## Runtime Requirements
 
-- LLVM/Clang 20 (or 18)
-- CUDA Toolkit 12.0+
-- Rust (stable)
-- CMake 3.20+
+| Dependency | Needed For | Install |
+|---|---|---|
+| CUDA Toolkit 12.0+ | Kernel compilation + tracing | `apt install nvidia-cuda-toolkit` or [NVIDIA](https://developer.nvidia.com/cuda-downloads) |
+| LLVM 20 (or 18) | `prlx compile` and Triton hook | `apt install llvm-20` or via [apt.llvm.org](https://apt.llvm.org) |
+
+The `prlx-diff` differ and Python API work without any external dependencies.
 
 ## License
 
-MIT OR Apache-2.0
+MIT

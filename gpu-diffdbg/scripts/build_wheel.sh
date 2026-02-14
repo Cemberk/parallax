@@ -87,7 +87,17 @@ echo "  -> prlx_runtime.h, trace_format.h"
 # ---- Build the wheel ----
 echo ""
 echo "=== Building wheel ==="
+rm -rf "$PROJECT_ROOT/dist"
 (cd "$PROJECT_ROOT" && python3 -m build --wheel 2>&1 | tail -5)
+
+# ---- Retag for manylinux (optional) ----
+if [ "${PRLX_MANYLINUX:-0}" = "1" ]; then
+    echo ""
+    echo "=== Retagging wheel for manylinux_2_28_x86_64 ==="
+    python3 -m wheel tags \
+        --platform-tag manylinux_2_28_x86_64 \
+        --remove "$PROJECT_ROOT/dist/"*.whl
+fi
 
 echo ""
 echo "=== Done ==="
