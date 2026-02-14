@@ -1,0 +1,622 @@
+#!/usr/bin/env python3
+"""
+PRLX Driver
+==================
+Main entry point for the GPU differential debugger toolkit.
+
+This script orchestrates the workflow:
+1. Compile CUDA kernels with automatic instrumentation
+2. Run traces with proper environment setup
+3. Invoke the differ with source location mapping
+
+Usage:
+    prlx diff <trace_a> <trace_b> [options]    Compare two traces
+    prlx run <binary> [args]                   Run with tracing enabled
+    prlx check <binary> [args]                 Run twice and auto-diff
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+import tempfile
+
+
+def find_site_map(search_dir=None):
+    """
+    Find the prlx-sites.json file by searching common locations.
+
+    Search order:
+    1. Current directory
+    2. Build directory
+    3. Parent directories up to project root
+    """
+    if search_dir is None:
+        search_dir = Path.cwd()
+    else:
+        search_dir = Path(search_dir)
+
+    # Check current directory first
+    candidates = [
+        search_dir / "prlx-sites.json",
+        search_dir / "build" / "prlx-sites.json",
+        search_dir / ".." / "build" / "prlx-sites.json",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    # Search parent directories
+    current = search_dir
+    for _ in range(5):  # Don't go too far up
+        site_map = current / "prlx-sites.json"
+        if site_map.exists():
+            return site_map.resolve()
+        current = current.parent
+
+    return None
+
+
+def find_differ_binary():
+    """Find the prlx-diff binary."""
+    # Try in the differ subdirectory
+    script_dir = Path(__file__).parent
+    differ_release = script_dir / "differ" / "target" / "release" / "prlx-diff"
+    differ_debug = script_dir / "differ" / "target" / "debug" / "prlx-diff"
+
+    if differ_release.exists():
+        return differ_release
+    if differ_debug.exists():
+        return differ_debug
+
+    # Try in PATH
+    try:
+        result = subprocess.run(["which", "prlx-diff"], capture_output=True, text=True)
+        if result.returncode == 0:
+            return Path(result.stdout.strip())
+    except:
+        pass
+
+    return None
+
+
+def cmd_diff(args):
+    """Run the differ on two trace files."""
+    trace_a = Path(args.trace_a)
+    trace_b = Path(args.trace_b)
+
+    if not trace_a.exists():
+        print(f"Error: Trace A not found: {trace_a}", file=sys.stderr)
+        return 1
+    if not trace_b.exists():
+        print(f"Error: Trace B not found: {trace_b}", file=sys.stderr)
+        return 1
+
+    # Find the differ binary
+    differ = find_differ_binary()
+    if not differ:
+        print("Error: prlx-diff binary not found. Build with: cd differ && cargo build --release", file=sys.stderr)
+        return 1
+
+    # Find site map if not provided
+    site_map = None
+    if args.map:
+        site_map = Path(args.map)
+        if not site_map.exists():
+            print(f"Warning: Site map not found: {site_map}", file=sys.stderr)
+            site_map = None
+    else:
+        # Auto-detect site map
+        site_map = find_site_map(trace_a.parent)
+        if site_map:
+            print(f"Auto-detected site map: {site_map}")
+        else:
+            print("Note: No site map found. Divergences will show site IDs only.")
+            print("      To see source locations, provide --map prlx-sites.json")
+
+    # Build differ command
+    cmd = [str(differ), str(trace_a), str(trace_b)]
+
+    if site_map and site_map.exists():
+        cmd.extend(["--map", str(site_map)])
+
+    # Pass through other options
+    if args.values:
+        cmd.append("--values")
+    if args.verbose:
+        cmd.append("--verbose")
+    if args.limit:
+        cmd.extend(["--limit", str(args.limit)])
+    if args.lookahead:
+        cmd.extend(["--lookahead", str(args.lookahead)])
+    if args.max_shown:
+        cmd.extend(["-n", str(args.max_shown)])
+    if hasattr(args, 'tui') and args.tui:
+        cmd.append("--tui")
+
+    # Execute differ
+    return subprocess.call(cmd)
+
+
+def cmd_run(args):
+    """Run a binary with tracing enabled."""
+    binary = Path(args.binary)
+
+    if not binary.exists():
+        print(f"Error: Binary not found: {binary}", file=sys.stderr)
+        return 1
+
+    # Determine output trace file
+    if args.output:
+        trace_file = args.output
+    else:
+        trace_file = f"{binary.stem}.prlx"
+
+    # Set environment variable
+    env = os.environ.copy()
+    env["PRLX_TRACE"] = trace_file
+
+    print(f"Running {binary} with tracing enabled...")
+    print(f"Trace output: {trace_file}")
+
+    # Execute the binary
+    cmd = [str(binary)] + args.binary_args
+    result = subprocess.call(cmd, env=env)
+
+    if result == 0 and Path(trace_file).exists():
+        print(f"✓ Trace generated: {trace_file}")
+
+    return result
+
+
+def cmd_check(args):
+    """Run a binary twice and automatically diff the traces."""
+    binary = Path(args.binary)
+
+    if not binary.exists():
+        print(f"Error: Binary not found: {binary}", file=sys.stderr)
+        return 1
+
+    # Create temporary directory for traces
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trace_a = Path(tmpdir) / "trace_a.prlx"
+        trace_b = Path(tmpdir) / "trace_b.prlx"
+
+        # Run first execution
+        print("=== Run A ===")
+        env = os.environ.copy()
+        env["PRLX_TRACE"] = str(trace_a)
+        cmd = [str(binary)] + args.binary_args
+        result_a = subprocess.call(cmd, env=env)
+
+        if result_a != 0:
+            print(f"Error: Run A failed with exit code {result_a}", file=sys.stderr)
+            return result_a
+
+        if not trace_a.exists():
+            print("Error: Run A did not generate a trace file", file=sys.stderr)
+            return 1
+
+        # Run second execution
+        print("\n=== Run B ===")
+        env["PRLX_TRACE"] = str(trace_b)
+        result_b = subprocess.call(cmd, env=env)
+
+        if result_b != 0:
+            print(f"Error: Run B failed with exit code {result_b}", file=sys.stderr)
+            return result_b
+
+        if not trace_b.exists():
+            print("Error: Run B did not generate a trace file", file=sys.stderr)
+            return 1
+
+        # Run diff
+        print("\n=== Differential Analysis ===")
+
+        # Create args object for cmd_diff
+        class DiffArgs:
+            def __init__(self):
+                self.trace_a = trace_a
+                self.trace_b = trace_b
+                self.map = args.map
+                self.values = args.values
+                self.verbose = args.verbose
+                self.limit = args.limit
+                self.lookahead = args.lookahead
+                self.max_shown = args.max_shown
+                self.tui = getattr(args, 'tui', False)
+
+        diff_args = DiffArgs()
+        return cmd_diff(diff_args)
+
+
+def detect_gpu_arch():
+    """Detect the highest GPU compute capability available."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            # Parse "12.0" → 120, "9.0" → 90, "8.6" → 86
+            for line in result.stdout.strip().split('\n'):
+                parts = line.strip().split('.')
+                if len(parts) == 2:
+                    major, minor = int(parts[0]), int(parts[1])
+                    return major * 10 + minor
+    except Exception:
+        pass
+    return None
+
+
+def find_clang_for_pass(script_dir):
+    """Find the clang version matching the LLVM pass."""
+    pass_lib = script_dir / "build" / "lib" / "pass" / "libPrlxPass.so"
+    if not pass_lib.exists():
+        return None, None
+
+    # Read the LLVM version from the pass library's dependencies
+    try:
+        result = subprocess.run(
+            ["readelf", "-d", str(pass_lib)],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.split('\n'):
+            if 'libLLVM.so.' in line:
+                # Extract version: "libLLVM.so.20.1" → 20
+                import re
+                m = re.search(r'libLLVM\.so\.(\d+)', line)
+                if m:
+                    llvm_ver = int(m.group(1))
+                    clang = f"clang++-{llvm_ver}"
+                    clang_path = subprocess.run(
+                        ["which", clang], capture_output=True, text=True
+                    )
+                    if clang_path.returncode == 0:
+                        return clang_path.stdout.strip(), llvm_ver
+    except Exception:
+        pass
+    return None, None
+
+
+def find_best_ptxas_arch(gpu_cc):
+    """Find the best arch that ptxas supports for the detected GPU."""
+    # Query nvcc for supported architectures
+    try:
+        result = subprocess.run(
+            ["nvcc", "--list-gpu-arch"], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            max_arch = 0
+            for line in result.stdout.strip().split('\n'):
+                line = line.strip()
+                if line.startswith("compute_"):
+                    try:
+                        arch = int(line.replace("compute_", ""))
+                        if arch <= gpu_cc and arch > max_arch:
+                            max_arch = arch
+                    except ValueError:
+                        pass
+            if max_arch > 0:
+                return max_arch
+    except Exception:
+        pass
+    return 90  # Fallback
+
+
+def cmd_compile(args):
+    """Compile a CUDA source file with LLVM pass instrumentation."""
+    script_dir = Path(__file__).parent
+    source = Path(args.source)
+
+    if not source.exists():
+        print(f"Error: Source file not found: {source}", file=sys.stderr)
+        return 1
+
+    # Find LLVM pass
+    pass_lib = script_dir / "build" / "lib" / "pass" / "libPrlxPass.so"
+    if not pass_lib.exists():
+        print("Error: LLVM pass not found. Build with: cmake --build build", file=sys.stderr)
+        return 1
+
+    # Find matching clang
+    clang, llvm_ver = find_clang_for_pass(script_dir)
+    if not clang:
+        print("Error: No matching clang found for LLVM pass.", file=sys.stderr)
+        print("       Install clang matching the pass's LLVM version.", file=sys.stderr)
+        return 1
+
+    # Detect GPU architecture
+    gpu_cc = detect_gpu_arch()
+    ptxas_arch = find_best_ptxas_arch(gpu_cc) if gpu_cc else 90
+
+    if args.arch:
+        ptxas_arch = args.arch
+
+    sm_str = f"sm_{ptxas_arch}"
+
+    # Determine output binary
+    if args.output:
+        output = args.output
+    else:
+        output = source.stem
+
+    # Build the unified source that includes runtime
+    # Create a temp wrapper that #includes the runtime
+    runtime_dir = script_dir / "lib" / "runtime"
+    common_dir = script_dir / "lib" / "common"
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.cu', delete=False, prefix='prlx_unified_') as f:
+        unified_path = f.name
+        f.write(f'// Auto-generated unified compilation wrapper\n')
+        f.write(f'#include "prlx_runtime.cu"\n')
+        f.write(f'#include "prlx_host.cu"\n')
+        f.write(f'#include "{source.resolve()}"\n')
+
+    try:
+        # Build clang command
+        cmd = [
+            clang,
+            f"-fpass-plugin={pass_lib}",
+            f"--cuda-gpu-arch={sm_str}",
+            f"--cuda-include-ptx={sm_str}",
+            "-g", "-O0",
+            f"-I{runtime_dir}",
+            f"-I{common_dir}",
+            f"-I{source.resolve().parent}",
+        ]
+
+        # Add user include paths
+        for inc in (args.include or []):
+            cmd.extend(["-I", inc])
+
+        cmd.extend([unified_path, "-lcudart", "-lm", "-o", str(output)])
+
+        # Add extra flags
+        if args.extra:
+            cmd.extend(args.extra)
+
+        if args.verbose:
+            print(f"GPU: cc{gpu_cc or '?'}, compiling for {sm_str} + PTX (JIT forward-compat)")
+            print(f"Command: {' '.join(cmd)}")
+
+        result = subprocess.run(cmd, capture_output=not args.verbose)
+
+        if result.returncode != 0:
+            if not args.verbose and result.stderr:
+                sys.stderr.buffer.write(result.stderr)
+            return result.returncode
+
+        print(f"Compiled: {output} (instrumented, {sm_str}+PTX)")
+        return 0
+
+    finally:
+        os.unlink(unified_path)
+
+
+def cmd_triton(args):
+    """Triton/Python integration management."""
+    script_dir = Path(__file__).parent
+
+    if args.info or args.check_env:
+        print("=== PRLX Triton Integration ===")
+
+        # Check for LLVM pass plugin
+        pass_plugin = script_dir / "build" / "lib" / "pass" / "libPrlxPass.so"
+        if pass_plugin.exists():
+            print(f"  LLVM Pass Plugin: {pass_plugin}")
+        else:
+            print("  LLVM Pass Plugin: NOT FOUND (build with cmake)")
+
+        # Check for shared runtime
+        runtime_lib = script_dir / "build" / "lib" / "runtime" / "libprlx_runtime_shared.so"
+        if runtime_lib.exists():
+            print(f"  Runtime Library:  {runtime_lib}")
+        else:
+            print("  Runtime Library:  NOT FOUND (build with cmake)")
+
+        # Check for differ
+        differ = find_differ_binary()
+        if differ:
+            print(f"  Differ Binary:    {differ}")
+        else:
+            print("  Differ Binary:    NOT FOUND (cargo build --release)")
+
+        # Check for Triton
+        try:
+            import triton
+            print(f"  Triton:           {triton.__version__}")
+        except ImportError:
+            print("  Triton:           NOT INSTALLED (pip install triton)")
+
+        # Check Python package
+        try:
+            sys.path.insert(0, str(script_dir / "python"))
+            import prlx
+            print(f"  prlx package:    {prlx.__version__}")
+        except ImportError:
+            print("  prlx package:    NOT INSTALLED (pip install -e python/)")
+
+        print()
+        print("Quick start:")
+        print("  pip install -e python/")
+        print("  python -c 'import prlx; prlx.integrate_with_triton()'")
+        return 0
+
+    if args.script:
+        # Run a Python script with Triton integration pre-loaded
+        script_path = Path(args.script)
+        if not script_path.exists():
+            print(f"Error: Script not found: {script_path}", file=sys.stderr)
+            return 1
+
+        env = os.environ.copy()
+
+        # Set up LLVM pass plugin
+        pass_plugin = script_dir / "build" / "lib" / "pass" / "libPrlxPass.so"
+        if pass_plugin.exists():
+            existing = env.get("LLVM_PASS_PLUGINS", "")
+            env["LLVM_PASS_PLUGINS"] = f"{existing};{pass_plugin}" if existing else str(pass_plugin)
+        else:
+            print("Warning: LLVM pass plugin not found", file=sys.stderr)
+
+        # Add python package to path
+        python_pkg = script_dir / "python"
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{python_pkg}:{existing_pp}" if existing_pp else str(python_pkg)
+
+        env["PRLX_HOME"] = str(script_dir)
+
+        cmd = [sys.executable, str(script_path)] + args.script_args
+        return subprocess.call(cmd, env=env)
+
+    # No args - show help
+    print("Usage:")
+    print("  prlx triton --info           Show integration status")
+    print("  prlx triton script.py        Run script with instrumentation")
+    return 0
+
+
+PRLX_VERSION = "1.0"
+
+PRLX_BANNER = r"""
+ ____  ____  _     __  __
+|  _ \|  _ \| |    \ \/ /
+| |_) | |_) | |     \  /
+|  __/|  _ <| |___  /  \
+|_|   |_| \_\_____|/_/\_\  v{version}
+
+PRLX — GPU Differential Debugger
+{gpu_line}
+"""
+
+
+def _detect_gpu():
+    """Try to detect the NVIDIA GPU name and SM architecture."""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,compute_cap", "--format=csv,noheader,nounits"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip().split("\n")[0]
+        parts = [p.strip() for p in out.split(",")]
+        if len(parts) >= 2:
+            name = parts[0]
+            sm = parts[1].replace(".", "")
+            return f"Auto-detected: NVIDIA {name} (SM_{sm})"
+    except Exception:
+        pass
+    return "No GPU detected"
+
+
+def print_banner():
+    gpu_info = _detect_gpu()
+    banner = PRLX_BANNER.format(
+        version=PRLX_VERSION,
+        gpu_line=f"(c) 2026 | {gpu_info}",
+    )
+    print(banner, file=sys.stderr)
+
+
+def main():
+    print_banner()
+
+    parser = argparse.ArgumentParser(
+        description="PRLX - Differential debugger for CUDA kernels",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Compare two traces
+  prlx diff trace_a.prlx trace_b.prlx
+
+  # Compare with source location mapping
+  prlx diff trace_a.prlx trace_b.prlx --map prlx-sites.json
+
+  # Run a binary with tracing
+  prlx run ./my_kernel --output my_trace.prlx
+
+  # Run twice and auto-diff
+  prlx check ./my_kernel
+
+  # Compile with automatic instrumentation
+  prlx compile kernel.cu -o my_kernel
+
+  # Triton integration info
+  prlx triton --info
+        """
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+
+    # diff command
+    parser_diff = subparsers.add_parser("diff", help="Compare two trace files")
+    parser_diff.add_argument("trace_a", help="First trace file (baseline)")
+    parser_diff.add_argument("trace_b", help="Second trace file (compare)")
+    parser_diff.add_argument("--map", help="Site mapping file (prlx-sites.json)")
+    parser_diff.add_argument("-n", "--max-shown", type=int, default=10, help="Max divergences to display")
+    parser_diff.add_argument("--values", action="store_true", help="Compare operand values")
+    parser_diff.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser_diff.add_argument("-l", "--limit", type=int, help="Max divergences to collect")
+    parser_diff.add_argument("--lookahead", type=int, help="Lookahead window size")
+    parser_diff.add_argument("--tui", action="store_true", help="Launch interactive TUI viewer")
+
+    # run command
+    parser_run = subparsers.add_parser("run", help="Run a binary with tracing enabled")
+    parser_run.add_argument("binary", help="Binary to execute")
+    parser_run.add_argument("-o", "--output", help="Output trace file")
+    parser_run.add_argument("binary_args", nargs="*", help="Arguments to pass to binary")
+
+    # check command
+    parser_check = subparsers.add_parser("check", help="Run twice and auto-diff")
+    parser_check.add_argument("binary", help="Binary to execute")
+    parser_check.add_argument("--map", help="Site mapping file (prlx-sites.json)")
+    parser_check.add_argument("-n", "--max-shown", type=int, default=10, help="Max divergences to display")
+    parser_check.add_argument("--values", action="store_true", help="Compare operand values")
+    parser_check.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser_check.add_argument("-l", "--limit", type=int, help="Max divergences to collect")
+    parser_check.add_argument("--lookahead", type=int, help="Lookahead window size")
+    parser_check.add_argument("--tui", action="store_true", help="Launch interactive TUI viewer")
+    parser_check.add_argument("binary_args", nargs="*", help="Arguments to pass to binary")
+
+    # compile command
+    parser_compile = subparsers.add_parser("compile", help="Compile CUDA source with instrumentation")
+    parser_compile.add_argument("source", help="CUDA source file (.cu)")
+    parser_compile.add_argument("-o", "--output", help="Output binary name")
+    parser_compile.add_argument("-I", "--include", action="append", help="Include directories")
+    parser_compile.add_argument("--arch", type=int, help="CUDA SM architecture (e.g. 90)")
+    parser_compile.add_argument("-v", "--verbose", action="store_true", help="Show compilation command")
+    parser_compile.add_argument("--extra", nargs="*", help="Extra compiler flags")
+
+    # triton command
+    parser_triton = subparsers.add_parser("triton", help="Triton/Python integration")
+    parser_triton.add_argument("--info", action="store_true", help="Show integration status")
+    parser_triton.add_argument("--check-env", action="store_true", help="Verify environment setup")
+    parser_triton.add_argument("script", nargs="?", help="Python script to run with Triton integration")
+    parser_triton.add_argument("script_args", nargs="*", help="Arguments to pass to the script")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 1
+
+    if args.command == "diff":
+        return cmd_diff(args)
+    elif args.command == "compile":
+        return cmd_compile(args)
+    elif args.command == "run":
+        return cmd_run(args)
+    elif args.command == "check":
+        return cmd_check(args)
+    elif args.command == "triton":
+        return cmd_triton(args)
+    else:
+        parser.print_help()
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -9,8 +9,8 @@ echo "==================================="
 echo ""
 
 BUILD_DIR="../build"
-PASS_SO="$BUILD_DIR/lib/pass/libGpuDiffDbgPass.so"
-RUNTIME_LIB="$BUILD_DIR/lib/runtime/libgddbg_runtime.a"
+PASS_SO="$BUILD_DIR/lib/pass/libPrlxPass.so"
+RUNTIME_LIB="$BUILD_DIR/lib/runtime/libprlx_runtime.a"
 
 # Check if pass exists
 if [ ! -f "$PASS_SO" ]; then
@@ -27,7 +27,7 @@ echo ""
 echo "2. Testing runtime (Phase 1)..."
 if [ -f "$BUILD_DIR/tests/manual_trace_test" ]; then
     cd "$BUILD_DIR/tests"
-    GDDBG_TRACE=auto_test.gddbg ./manual_trace_test
+    PRLX_TRACE=auto_test.prlx ./manual_trace_test
     echo "✓ Runtime test passed"
     echo ""
 else
@@ -36,17 +36,17 @@ else
 fi
 
 # Check if trace was created
-if [ -f "$BUILD_DIR/tests/auto_test.gddbg" ]; then
-    ls -lh "$BUILD_DIR/tests/auto_test.gddbg"
+if [ -f "$BUILD_DIR/tests/auto_test.prlx" ]; then
+    ls -lh "$BUILD_DIR/tests/auto_test.prlx"
     echo "✓ Trace file created"
     echo ""
 fi
 
 # Test differ (Phase 2)
 echo "3. Testing differ (Phase 2)..."
-if [ -f "$BUILD_DIR/tests/trace_a.gddbg" ] && [ -f "$BUILD_DIR/tests/trace_b.gddbg" ]; then
+if [ -f "$BUILD_DIR/tests/trace_a.prlx" ] && [ -f "$BUILD_DIR/tests/trace_b.prlx" ]; then
     cd "$BUILD_DIR/tests"
-    ../../differ/target/release/gddbg-diff trace_a.gddbg trace_b.gddbg -n 3 || true
+    ../../differ/target/release/prlx-diff trace_a.prlx trace_b.prlx -n 3 || true
     echo "✓ Differ test passed"
     echo ""
 fi
@@ -57,7 +57,7 @@ echo "==================================="
 echo ""
 echo "✅ Phase 1 (Runtime): COMPLETE"
 echo "   - Manual trace recording works"
-echo "   - Runtime functions: __gddbg_record_branch, etc."
+echo "   - Runtime functions: __prlx_record_branch, etc."
 echo ""
 echo "✅ Phase 2 (Differ): COMPLETE"
 echo "   - Zero-copy parser with memmap2"

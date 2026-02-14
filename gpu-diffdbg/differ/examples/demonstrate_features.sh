@@ -21,7 +21,7 @@ cargo test --quiet 2>&1 | grep -E "(test result|running)" || true
 echo ""
 
 # Find real trace files
-TRACE_DIR="$(find ../build -name "trace_a.gddbg" -exec dirname {} \; 2>/dev/null | head -1)"
+TRACE_DIR="$(find ../build -name "trace_a.prlx" -exec dirname {} \; 2>/dev/null | head -1)"
 
 if [ -z "$TRACE_DIR" ]; then
     echo "Warning: No real trace files found. Run divergence_test first:"
@@ -34,17 +34,17 @@ echo ""
 
 # Test 1: Basic diff
 echo "=== Test 1: Basic Divergence Detection ==="
-./target/release/gddbg-diff \
-    "$TRACE_DIR/trace_a.gddbg" \
-    "$TRACE_DIR/trace_b.gddbg" \
+./target/release/prlx-diff \
+    "$TRACE_DIR/trace_a.prlx" \
+    "$TRACE_DIR/trace_b.prlx" \
     -n 5
 echo ""
 
 # Test 2: With verbose trace info
 echo "=== Test 2: Verbose Mode (shows trace headers) ==="
-./target/release/gddbg-diff \
-    "$TRACE_DIR/trace_a.gddbg" \
-    "$TRACE_DIR/trace_b.gddbg" \
+./target/release/prlx-diff \
+    "$TRACE_DIR/trace_a.prlx" \
+    "$TRACE_DIR/trace_b.prlx" \
     --verbose \
     -n 3
 echo ""
@@ -52,9 +52,9 @@ echo ""
 # Test 3: With value comparison (may be noisy)
 echo "=== Test 3: Value Comparison Enabled ==="
 echo "(Note: This compares operand values - can be noisy for data-dependent code)"
-./target/release/gddbg-diff \
-    "$TRACE_DIR/trace_a.gddbg" \
-    "$TRACE_DIR/trace_b.gddbg" \
+./target/release/prlx-diff \
+    "$TRACE_DIR/trace_a.prlx" \
+    "$TRACE_DIR/trace_b.prlx" \
     --values \
     -n 10
 echo ""
@@ -62,17 +62,17 @@ echo ""
 # Test 4: Lookahead window demo
 echo "=== Test 4: Different Lookahead Window Sizes ==="
 echo "Small window (4 events):"
-./target/release/gddbg-diff \
-    "$TRACE_DIR/trace_a.gddbg" \
-    "$TRACE_DIR/trace_b.gddbg" \
+./target/release/prlx-diff \
+    "$TRACE_DIR/trace_a.prlx" \
+    "$TRACE_DIR/trace_b.prlx" \
     --lookahead 4 \
     -n 3
 echo ""
 
 echo "Large window (64 events - better at re-syncing):"
-./target/release/gddbg-diff \
-    "$TRACE_DIR/trace_a.gddbg" \
-    "$TRACE_DIR/trace_b.gddbg" \
+./target/release/prlx-diff \
+    "$TRACE_DIR/trace_a.prlx" \
+    "$TRACE_DIR/trace_b.prlx" \
     --lookahead 64 \
     -n 3
 echo ""
@@ -80,9 +80,9 @@ echo ""
 # Test 5: Dump mode for debugging
 echo "=== Test 5: Dump Mode (inspect raw events) ==="
 echo "First 10 events from trace A:"
-./target/release/gddbg-diff \
-    "$TRACE_DIR/trace_a.gddbg" \
-    "$TRACE_DIR/trace_b.gddbg" \
+./target/release/prlx-diff \
+    "$TRACE_DIR/trace_a.prlx" \
+    "$TRACE_DIR/trace_b.prlx" \
     --dump-a 10
 echo ""
 

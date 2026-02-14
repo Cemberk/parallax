@@ -1,4 +1,4 @@
-// Simple branch kernel for testing GPU DiffDbg
+// Simple branch kernel for testing PRLX
 // This kernel can be compiled with the LLVM pass to test end-to-end instrumentation
 
 #include <cuda_runtime.h>
@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
 
     printf("Launching kernel with grid=%d, block=%d\n", gridDim.x, blockDim.x);
 
-    // NOTE: When compiled with gddbg runtime, the pre/post launch hooks
+    // NOTE: When compiled with prlx runtime, the pre/post launch hooks
     // are automatically called via constructor/destructor injection
 
     // Launch kernel

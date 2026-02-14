@@ -5,7 +5,7 @@
 #include "llvm/Support/FileSystem.h"
 #include <sstream>
 
-namespace gddbg {
+namespace prlx {
 
 std::string SourceLocation::toString() const {
     std::ostringstream oss;
@@ -99,7 +99,7 @@ bool SiteTable::exportToJSON(const std::string& filename) const {
     std::error_code EC;
     llvm::raw_fd_ostream OS(filename, EC, llvm::sys::fs::OF_None);
     if (EC) {
-        llvm::errs() << "[gddbg] Error opening site table file: " << EC.message() << "\n";
+        llvm::errs() << "[prlx] Error opening site table file: " << EC.message() << "\n";
         return false;
     }
 
@@ -143,4 +143,4 @@ bool SiteTable::exportToJSON(const std::string& filename) const {
     return true;
 }
 
-} // namespace gddbg
+} // namespace prlx

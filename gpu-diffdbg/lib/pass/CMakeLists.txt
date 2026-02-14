@@ -17,15 +17,15 @@ include_directories(${LLVM_INCLUDE_DIRS})
 
 # Pass sources
 set(PASS_SOURCES
-    GpuDiffDbgPass.cpp
+    PrlxPass.cpp
     SiteTable.cpp
 )
 
 # Build the pass as a shared library (plugin)
-add_library(GpuDiffDbgPass MODULE ${PASS_SOURCES})
+add_library(PrlxPass MODULE ${PASS_SOURCES})
 
 # Include common headers
-target_include_directories(GpuDiffDbgPass PRIVATE
+target_include_directories(PrlxPass PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
 
@@ -33,7 +33,7 @@ target_include_directories(GpuDiffDbgPass PRIVATE
 # when loaded into opt/clang (which also use libLLVM.so)
 if(LLVM_LINK_LLVM_DYLIB)
     # LLVM was built with shared libLLVM - link against it
-    target_link_libraries(GpuDiffDbgPass PRIVATE LLVM)
+    target_link_libraries(PrlxPass PRIVATE LLVM)
 else()
     # Fallback: don't link LLVM libs at all for MODULE plugins.
     # The pass plugin will resolve symbols from the host process (opt/clang).
@@ -42,22 +42,22 @@ else()
 endif()
 
 # Set output name
-set_target_properties(GpuDiffDbgPass PROPERTIES
+set_target_properties(PrlxPass PROPERTIES
     PREFIX ""
-    OUTPUT_NAME "libGpuDiffDbgPass"
+    OUTPUT_NAME "libPrlxPass"
 )
 
 # On Linux, we need -fPIC and undefined symbols are resolved at load time
 if(UNIX AND NOT APPLE)
-    target_compile_options(GpuDiffDbgPass PRIVATE -fPIC)
-    target_link_options(GpuDiffDbgPass PRIVATE -Wl,-znodelete)
+    target_compile_options(PrlxPass PRIVATE -fPIC)
+    target_link_options(PrlxPass PRIVATE -Wl,-znodelete)
     # Allow undefined symbols - they come from the host process (opt/clang)
-    set_target_properties(GpuDiffDbgPass PROPERTIES
+    set_target_properties(PrlxPass PROPERTIES
         LINK_FLAGS "-Wl,--allow-shlib-undefined"
     )
 endif()
 
 # Installation
-install(TARGETS GpuDiffDbgPass
+install(TARGETS PrlxPass
     LIBRARY DESTINATION lib
 )

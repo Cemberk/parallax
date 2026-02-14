@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(gpu-diffdbg LANGUAGES CXX CUDA)
+project(prlx LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,7 +8,7 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # Configurable CUDA architectures (SM_70=Volta/V100, SM_80=Ampere/A100, SM_90=Hopper/H100)
-set(GDDBG_CUDA_ARCHITECTURES "70;80;90" CACHE STRING "CUDA architectures to build for")
+set(PRLX_CUDA_ARCHITECTURES "70;80;90" CACHE STRING "CUDA architectures to build for")
 
 # Export compile commands for editor integration
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -52,7 +52,7 @@ foreach(_LLVM_VER 20 18)
             message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
             message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
             set(BUILD_LLVM_PASS ON)
-            set(GDDBG_LLVM_VERSION ${_LLVM_VER})
+            set(PRLX_LLVM_VERSION ${_LLVM_VER})
         endif()
     endif()
 endforeach()
@@ -68,6 +68,12 @@ add_subdirectory(lib/runtime)
 # Build LLVM pass (if LLVM is available)
 if(BUILD_LLVM_PASS)
     add_subdirectory(lib/pass)
+endif()
+
+# NVBit binary instrumentation backend (optional)
+option(PRLX_BUILD_NVBIT "Build NVBit binary instrumentation tool" OFF)
+if(PRLX_BUILD_NVBIT)
+    add_subdirectory(lib/nvbit_tool)
 endif()
 
 # Build tests

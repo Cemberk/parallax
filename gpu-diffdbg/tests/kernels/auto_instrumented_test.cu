@@ -1,7 +1,7 @@
 // Test case for automatic instrumentation via LLVM pass
-// This kernel will be automatically instrumented without manual __gddbg_record_* calls
+// This kernel will be automatically instrumented without manual __prlx_record_* calls
 
-#include "../../lib/runtime/gddbg_runtime.h"
+#include "../../lib/runtime/prlx_runtime.h"
 #include <cuda_runtime.h>
 #include <cstdio>
 
@@ -31,7 +31,7 @@ int main() {
     printf("This kernel should be automatically instrumented by the LLVM pass\n\n");
 
     // Initialize runtime
-    gddbg_init();
+    prlx_init();
 
     // Allocate host data
     int* h_data = new int[N];
@@ -52,14 +52,14 @@ int main() {
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
 
     // Pre-launch
-    gddbg_pre_launch("auto_test_kernel", gridDim, blockDim);
+    prlx_pre_launch("auto_test_kernel", gridDim, blockDim);
 
     // Launch kernel (should be automatically instrumented)
     auto_test_kernel<<<gridDim, blockDim>>>(d_data, d_out, threshold, N);
     cudaDeviceSynchronize();
 
     // Post-launch
-    gddbg_post_launch();
+    prlx_post_launch();
 
     // Copy results
     cudaMemcpy(h_out, d_out, N * sizeof(int), cudaMemcpyDeviceToHost);
@@ -76,9 +76,9 @@ int main() {
     delete[] h_data;
     delete[] h_out;
 
-    gddbg_shutdown();
+    prlx_shutdown();
 
-    printf("\nSUCCESS: Check trace file and gddbg-sites.json for instrumentation\n");
+    printf("\nSUCCESS: Check trace file and prlx-sites.json for instrumentation\n");
     printf("Expected: Multiple branch events auto-recorded at each conditional\n");
 
     return 0;

@@ -1,4 +1,4 @@
-//! GPU DiffDbg: Differential debugger for CUDA traces
+//! PRLX: Differential debugger for CUDA traces
 //!
 //! This library provides functionality to parse and compare GPU execution traces.
 

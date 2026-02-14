@@ -12,7 +12,7 @@
 //
 // This validates production readiness on large-scale GPU workloads.
 
-#include "../../lib/runtime/gddbg_runtime.h"
+#include "../../lib/runtime/prlx_runtime.h"
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <ctime>
@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     printf("\n");
 
     // Initialize runtime
-    gddbg_init();
+    prlx_init();
 
     // Allocate host data
     int* h_data = new int[N];
@@ -153,7 +153,7 @@ int main(int argc, char** argv) {
 
     // Pre-launch
     printf("Launching kernel...\n");
-    gddbg_pre_launch("stress_kernel", gridDim, blockDim);
+    prlx_pre_launch("stress_kernel", gridDim, blockDim);
 
     // Time the kernel
     cudaEvent_t start, stop;
@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
     printf("Execution time: %.2f ms\n\n", milliseconds);
 
     // Post-launch
-    gddbg_post_launch();
+    prlx_post_launch();
 
     // Copy results
     cudaMemcpy(h_out, d_out, N * sizeof(int), cudaMemcpyDeviceToHost);
@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
     delete[] h_data;
     delete[] h_out;
 
-    gddbg_shutdown();
+    prlx_shutdown();
 
     printf("\n");
     print_memory_info();
@@ -212,11 +212,11 @@ int main(int argc, char** argv) {
     printf("  [ ] Verify differ can load and process the large trace\n");
 
     printf("\nTo test:\n");
-    printf("  1. Check trace file: ls -lh *.gddbg\n");
+    printf("  1. Check trace file: ls -lh *.prlx\n");
     printf("  2. Run twice with different stress levels:\n");
-    printf("       GDDBG_TRACE=trace_light.gddbg ./occupancy_test light\n");
-    printf("       GDDBG_TRACE=trace_medium.gddbg ./occupancy_test medium\n");
-    printf("  3. Compare: gddbg diff trace_light.gddbg trace_medium.gddbg\n");
+    printf("       PRLX_TRACE=trace_light.prlx ./occupancy_test light\n");
+    printf("       PRLX_TRACE=trace_medium.prlx ./occupancy_test medium\n");
+    printf("  3. Compare: prlx diff trace_light.prlx trace_medium.prlx\n");
 
     return 0;
 }

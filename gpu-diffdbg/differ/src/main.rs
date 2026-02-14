@@ -1,4 +1,4 @@
-//! GPU DiffDbg: Differential debugger for CUDA traces
+//! PRLX: Differential debugger for CUDA traces
 //!
 //! Compares two execution traces and identifies the exact point of divergence.
 
@@ -19,7 +19,7 @@ use report::{print_divergences, print_history_context, print_summary, print_trac
 use site_map::{SiteMap, SiteRemapper};
 
 #[derive(Parser, Debug)]
-#[command(name = "gddbg-diff")]
+#[command(name = "prlx-diff")]
 #[command(about = "GPU Differential Debugger - Compare CUDA execution traces")]
 #[command(version)]
 struct Args {
@@ -51,7 +51,7 @@ struct Args {
     #[arg(long, default_value = "32")]
     lookahead: usize,
 
-    /// Site mapping file (gddbg-sites.json) for source location information
+    /// Site mapping file (prlx-sites.json) for source location information
     #[arg(long = "map")]
     site_map: Option<PathBuf>,
 

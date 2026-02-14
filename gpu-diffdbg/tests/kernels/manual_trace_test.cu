@@ -1,7 +1,7 @@
 // Test kernel for Week 1A: Manual trace recording (no LLVM pass yet)
 // This tests the runtime independently before integrating with the LLVM pass
 
-#include "../../lib/runtime/gddbg_runtime.h"
+#include "../../lib/runtime/prlx_runtime.h"
 #include <cuda_runtime.h>
 #include <cstdio>
 
@@ -15,7 +15,7 @@ __global__ void simple_branch(int* data, int* out, int threshold, int n) {
     uint32_t condition = (data[idx] > threshold) ? 1 : 0;
     uint32_t operand_a = data[idx];
 
-    __gddbg_record_branch(site_id, condition, operand_a);
+    __prlx_record_branch(site_id, condition, operand_a);
 
     // Execute the branch
     if (condition) {
@@ -53,7 +53,7 @@ int main() {
            gridDim.x, blockDim.x, threshold);
 
     // Pre-launch: set up trace buffer
-    gddbg_pre_launch("simple_branch", gridDim, blockDim);
+    prlx_pre_launch("simple_branch", gridDim, blockDim);
 
     // Launch kernel
     simple_branch<<<gridDim, blockDim>>>(d_data, d_out, threshold, N);
@@ -69,7 +69,7 @@ int main() {
     }
 
     // Post-launch: copy trace buffer and write to file
-    gddbg_post_launch();
+    prlx_post_launch();
 
     // Copy results back
     cudaMemcpy(h_out, d_out, N * sizeof(int), cudaMemcpyDeviceToHost);

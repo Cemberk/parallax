@@ -8,8 +8,9 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::trace_format::{
-    HistoryEntry, HistoryRingHeader, TraceEvent, TraceFileHeader, WarpBufferHeader,
-    GDDBG_FLAG_COMPRESS, GDDBG_FLAG_HISTORY, GDDBG_MAGIC, GDDBG_VERSION,
+    HistoryEntry, HistoryRingHeader, SnapshotEntry, SnapshotRingHeader,
+    TraceEvent, TraceFileHeader, WarpBufferHeader,
+    PRLX_FLAG_COMPRESS, PRLX_FLAG_HISTORY, PRLX_MAGIC, PRLX_VERSION,
 };
 
 /// Backing storage for trace data: either memory-mapped or decompressed
@@ -57,24 +58,24 @@ impl TraceFile {
         // Parse header to check for compression
         let header: TraceFileHeader = *from_bytes(&mmap[..header_size]);
 
-        if header.magic != GDDBG_MAGIC {
+        if header.magic != PRLX_MAGIC {
             bail!(
                 "Invalid magic number: 0x{:016x} (expected 0x{:016x})",
                 header.magic,
-                GDDBG_MAGIC
+                PRLX_MAGIC
             );
         }
 
-        if header.version != GDDBG_VERSION {
+        if header.version != PRLX_VERSION {
             bail!(
                 "Unsupported version: {} (expected {})",
                 header.version,
-                GDDBG_VERSION
+                PRLX_VERSION
             );
         }
 
         // If compressed, decompress and create a Vec-backed TraceFile
-        if header.flags & GDDBG_FLAG_COMPRESS != 0 {
+        if header.flags & PRLX_FLAG_COMPRESS != 0 {
             let compressed_payload = &mmap[header_size..];
             let decompressed = zstd::decode_all(compressed_payload)
                 .context("Failed to decompress zstd-compressed trace")?;
@@ -239,6 +240,89 @@ impl TraceFile {
         Ok(Some((ring_header, entries)))
     }
 
+    /// Check if this trace file contains snapshot data
+    pub fn has_snapshot(&self) -> bool {
+        self.header.has_snapshot()
+    }
+
+    /// Get the snapshot ring for a specific warp (zero-copy)
+    pub fn get_warp_snapshot(
+        &self,
+        warp_index: usize,
+    ) -> Result<Option<(&SnapshotRingHeader, &[SnapshotEntry])>> {
+        if !self.header.has_snapshot() {
+            return Ok(None);
+        }
+
+        if warp_index >= self.header.total_warp_slots as usize {
+            bail!(
+                "Warp index {} out of range (total warps: {})",
+                warp_index,
+                self.header.total_warp_slots
+            );
+        }
+
+        let snap_offset = self.header.snapshot_offset();
+        let ring_size = self.header.snapshot_ring_size();
+        let depth = self.header.snapshot_depth as usize;
+
+        let warp_ring_offset = snap_offset + warp_index * ring_size;
+        let warp_ring_end = warp_ring_offset + ring_size;
+
+        // Gracefully handle truncated files
+        if warp_ring_end > self.data().len() {
+            return Ok(None);
+        }
+
+        let ring_data = &self.data()[warp_ring_offset..warp_ring_end];
+
+        let ring_header: &SnapshotRingHeader =
+            from_bytes(&ring_data[..std::mem::size_of::<SnapshotRingHeader>()]);
+
+        let entries_data = &ring_data[std::mem::size_of::<SnapshotRingHeader>()..];
+        let entries: &[SnapshotEntry] = try_cast_slice(entries_data)
+            .map_err(|e| anyhow!("Failed to cast snapshot entries: {}", e))?;
+
+        let entries = &entries[..depth.min(entries.len())];
+
+        Ok(Some((ring_header, entries)))
+    }
+
+    /// Get the most recent snapshot entry matching a specific site_id for a warp
+    pub fn get_snapshot_for_site(
+        &self,
+        warp_index: usize,
+        site_id: u32,
+    ) -> Result<Option<SnapshotEntry>> {
+        match self.get_warp_snapshot(warp_index)? {
+            None => Ok(None),
+            Some((ring_header, entries)) => {
+                let depth = ring_header.depth as usize;
+                let total = ring_header.total_writes as usize;
+
+                if total == 0 || depth == 0 {
+                    return Ok(None);
+                }
+
+                // Find matching entry with highest seq (most recent)
+                let valid_count = total.min(depth);
+                let mut best: Option<&SnapshotEntry> = None;
+
+                for entry in entries.iter().take(valid_count) {
+                    if entry.site_id == site_id {
+                        match best {
+                            None => best = Some(entry),
+                            Some(prev) if entry.seq > prev.seq => best = Some(entry),
+                            _ => {}
+                        }
+                    }
+                }
+
+                Ok(best.copied())
+            }
+        }
+    }
+
     /// Get ordered history entries for a warp, sorted by sequence number (most recent last)
     pub fn get_ordered_history(&self, warp_index: usize) -> Result<Vec<HistoryEntry>> {
         match self.get_warp_history(warp_index)? {
@@ -324,5 +408,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<WarpBufferHeader>(), 16);
         assert_eq!(std::mem::size_of::<HistoryRingHeader>(), 16);
         assert_eq!(std::mem::size_of::<HistoryEntry>(), 16);
+        assert_eq!(std::mem::size_of::<SnapshotRingHeader>(), 16);
+        assert_eq!(std::mem::size_of::<SnapshotEntry>(), 288);
     }
 }

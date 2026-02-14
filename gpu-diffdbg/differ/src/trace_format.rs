@@ -3,23 +3,27 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// Magic number for trace file format: "GDDBGGPU\0"
-pub const GDDBG_MAGIC: u64 = 0x4744444247504400;
+/// Magic number for trace file format: "PRLXGPU\0"
+pub const PRLX_MAGIC: u64 = 0x50524C5800000000;
 
 /// Current trace format version
-pub const GDDBG_VERSION: u32 = 1;
+pub const PRLX_VERSION: u32 = 1;
 
 /// Default number of events per warp
-pub const GDDBG_EVENTS_PER_WARP: usize = 4096;
+pub const PRLX_EVENTS_PER_WARP: usize = 4096;
 
 /// Header flags
-pub const GDDBG_FLAG_COMPACT: u32 = 0x1;
-pub const GDDBG_FLAG_COMPRESS: u32 = 0x2;
-pub const GDDBG_FLAG_HISTORY: u32 = 0x4;
-pub const GDDBG_FLAG_SAMPLED: u32 = 0x8;
+pub const PRLX_FLAG_COMPACT: u32 = 0x1;
+pub const PRLX_FLAG_COMPRESS: u32 = 0x2;
+pub const PRLX_FLAG_HISTORY: u32 = 0x4;
+pub const PRLX_FLAG_SAMPLED: u32 = 0x8;
+pub const PRLX_FLAG_SNAPSHOT: u32 = 0x10;
 
 /// Default history ring depth (entries per warp)
-pub const GDDBG_HISTORY_DEPTH_DEFAULT: usize = 64;
+pub const PRLX_HISTORY_DEPTH_DEFAULT: usize = 64;
+
+/// Default snapshot ring depth (entries per warp)
+pub const PRLX_SNAPSHOT_DEPTH_DEFAULT: usize = 32;
 
 /// Event type constants
 pub const EVENT_BRANCH: u8 = 0;
@@ -61,7 +65,8 @@ pub struct TraceFileHeader {
     pub history_depth: u32,         // 4 bytes, offset 140 (history entries per warp)
     pub history_section_offset: u32, // 4 bytes, offset 144 (byte offset to history, 0=auto)
     pub sample_rate: u32,           // 4 bytes, offset 148 (1 = all, N = 1/N events)
-    pub _reserved: [u32; 2],        // 8 bytes, offset 152
+    pub snapshot_depth: u32,        // 4 bytes, offset 152 (snapshot entries per warp, 0 = none)
+    pub snapshot_section_offset: u32, // 4 bytes, offset 156 (byte offset to snapshot section, 0=auto)
 }
 
 // Compile-time assertion that header is exactly 160 bytes
@@ -122,6 +127,34 @@ pub struct HistoryEntry {
 
 const _: () = assert!(std::mem::size_of::<HistoryEntry>() == 16);
 
+/// Per-warp snapshot ring header (16 bytes - MUST match C++ SnapshotRingHeader)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct SnapshotRingHeader {
+    pub write_idx: u32,     // Current write position (wraps via modulo)
+    pub depth: u32,         // Ring capacity
+    pub total_writes: u32,  // Monotonic counter (detects wrap)
+    pub _reserved: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<SnapshotRingHeader>() == 16);
+
+/// Per-lane comparison operand snapshot (288 bytes = 18 * 16, aligned for v4.u32)
+/// Captures both operands of ICmpInst/FCmpInst for all 32 lanes via __shfl_sync
+#[repr(C, align(16))]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct SnapshotEntry {
+    pub site_id: u32,           // 4B - links back to the branch event
+    pub active_mask: u32,       // 4B - which lanes were active
+    pub seq: u32,               // 4B - monotonic sequence for ordering
+    pub cmp_predicate: u32,     // 4B - ICmp/FCmp predicate enum value
+    pub lhs_values: [u32; 32],  // 128B - per-lane LHS operand
+    pub rhs_values: [u32; 32],  // 128B - per-lane RHS operand
+    pub _pad: [u32; 4],         // 16B - pad to 288 = 18 * 16
+}
+
+const _: () = assert!(std::mem::size_of::<SnapshotEntry>() == 288);
+
 impl TraceFileHeader {
     /// Get the kernel name as a Rust string (strips null padding)
     pub fn kernel_name_str(&self) -> &str {
@@ -139,7 +172,7 @@ impl TraceFileHeader {
 
     /// Check if history data is present
     pub fn has_history(&self) -> bool {
-        self.flags & GDDBG_FLAG_HISTORY != 0 && self.history_depth > 0
+        self.flags & PRLX_FLAG_HISTORY != 0 && self.history_depth > 0
     }
 
     /// Calculate the byte offset where the history section starts
@@ -165,6 +198,27 @@ impl TraceFileHeader {
         } else {
             base
         }
+    }
+
+    /// Check if snapshot data is present
+    pub fn has_snapshot(&self) -> bool {
+        self.flags & PRLX_FLAG_SNAPSHOT != 0 && self.snapshot_depth > 0
+    }
+
+    /// Calculate the byte offset where the snapshot section starts
+    pub fn snapshot_offset(&self) -> usize {
+        if self.snapshot_section_offset > 0 {
+            self.snapshot_section_offset as usize
+        } else {
+            // Snapshot comes after history (or after event buffers if no history)
+            self.expected_file_size_with_history()
+        }
+    }
+
+    /// Calculate the size of one warp's snapshot ring (header + entries)
+    pub fn snapshot_ring_size(&self) -> usize {
+        std::mem::size_of::<SnapshotRingHeader>()
+            + self.snapshot_depth as usize * std::mem::size_of::<SnapshotEntry>()
     }
 }
 

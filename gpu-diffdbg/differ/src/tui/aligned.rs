@@ -131,6 +131,11 @@ impl AlignedTrace {
         self.trace_a.has_history() || self.trace_b.has_history()
     }
 
+    /// Check if either trace has snapshot data
+    pub fn has_snapshot(&self) -> bool {
+        self.trace_a.has_snapshot() || self.trace_b.has_snapshot()
+    }
+
     /// Get ordered history entries for a warp from both traces
     pub fn get_history(&self, warp_idx: u32) -> (Vec<HistoryEntry>, Vec<HistoryEntry>) {
         let hist_a = self

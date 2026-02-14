@@ -1,7 +1,7 @@
 //! Integration tests for the differential analysis engine
 
-use gddbg_diff::differ::{diff_traces, DiffConfig, DivergenceKind};
-use gddbg_diff::trace_format::*;
+use prlx_diff::differ::{diff_traces, DiffConfig, DivergenceKind};
+use prlx_diff::trace_format::*;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -11,8 +11,8 @@ fn create_test_trace(kernel_name: &str, events: &[Vec<TraceEvent>]) -> NamedTemp
 
     // Create header
     let mut header = TraceFileHeader {
-        magic: GDDBG_MAGIC,
-        version: GDDBG_VERSION,
+        magic: PRLX_MAGIC,
+        version: PRLX_VERSION,
         flags: 0,
         kernel_name_hash: 0x1234567890ABCDEF,
         kernel_name: [0; 64],
@@ -20,14 +20,15 @@ fn create_test_trace(kernel_name: &str, events: &[Vec<TraceEvent>]) -> NamedTemp
         block_dim: [32, 1, 1],
         num_warps_per_block: 1,
         total_warp_slots: events.len() as u32,
-        events_per_warp: GDDBG_EVENTS_PER_WARP as u32,
+        events_per_warp: PRLX_EVENTS_PER_WARP as u32,
         _pad: 0,
         timestamp: 1234567890,
         cuda_arch: 80,
         history_depth: 0,
         history_section_offset: 0,
         sample_rate: 0,
-        _reserved: [0; 2],
+        snapshot_depth: 0,
+        snapshot_section_offset: 0,
     };
 
     // Copy kernel name
@@ -58,7 +59,7 @@ fn create_test_trace(kernel_name: &str, events: &[Vec<TraceEvent>]) -> NamedTemp
         }
 
         // Pad remaining events with zeros
-        let remaining = GDDBG_EVENTS_PER_WARP - warp_events.len();
+        let remaining = PRLX_EVENTS_PER_WARP - warp_events.len();
         let zero_event = TraceEvent {
             site_id: 0,
             event_type: 0,
@@ -114,8 +115,8 @@ fn test_identical_traces() {
     let trace_a_file = create_test_trace("test_kernel", &events);
     let trace_b_file = create_test_trace("test_kernel", &events);
 
-    let trace_a = gddbg_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
-    let trace_b = gddbg_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
 
     let config = DiffConfig::default();
     let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
@@ -169,8 +170,8 @@ fn test_active_mask_divergence() {
     let trace_a_file = create_test_trace("test_kernel", &events_a);
     let trace_b_file = create_test_trace("test_kernel", &events_b);
 
-    let trace_a = gddbg_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
-    let trace_b = gddbg_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
 
     let config = DiffConfig::default();
     let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
@@ -272,8 +273,8 @@ fn test_extra_events_resync() {
     let trace_a_file = create_test_trace("test_kernel", &events_a);
     let trace_b_file = create_test_trace("test_kernel", &events_b);
 
-    let trace_a = gddbg_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
-    let trace_b = gddbg_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
 
     let config = DiffConfig::default();
     let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
@@ -323,8 +324,8 @@ fn test_branch_direction_divergence() {
     let trace_a_file = create_test_trace("test_kernel", &events_a);
     let trace_b_file = create_test_trace("test_kernel", &events_b);
 
-    let trace_a = gddbg_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
-    let trace_b = gddbg_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
 
     let config = DiffConfig::default();
     let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
@@ -385,8 +386,8 @@ fn test_path_divergence() {
     let trace_a_file = create_test_trace("test_kernel", &events_a);
     let trace_b_file = create_test_trace("test_kernel", &events_b);
 
-    let trace_a = gddbg_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
-    let trace_b = gddbg_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
 
     let config = DiffConfig {
         lookahead_window: 2, // Small window, won't find re-sync
@@ -438,8 +439,8 @@ fn test_value_divergence() {
     let trace_a_file = create_test_trace("test_kernel", &events_a);
     let trace_b_file = create_test_trace("test_kernel", &events_b);
 
-    let trace_a = gddbg_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
-    let trace_b = gddbg_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
 
     // Test with value comparison disabled (default)
     let config_no_values = DiffConfig::default();

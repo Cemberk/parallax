@@ -5,7 +5,7 @@
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <trace.gddbg>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <trace.prlx>\n", argv[0]);
         return 1;
     }
 
@@ -24,15 +24,15 @@ int main(int argc, char** argv) {
     }
 
     // Validate magic
-    if (header.magic != GDDBG_MAGIC) {
+    if (header.magic != PRLX_MAGIC) {
         fprintf(stderr, "Invalid magic: 0x%016lx (expected 0x%016lx)\n",
-                header.magic, GDDBG_MAGIC);
+                header.magic, PRLX_MAGIC);
         fclose(f);
         return 1;
     }
 
     // Print header
-    printf("=== GDDBG Trace File ===\n");
+    printf("=== PRLX Trace File ===\n");
     printf("Version: %u\n", header.version);
     printf("Kernel: %s (hash: 0x%016lx)\n", header.kernel_name, header.kernel_name_hash);
     printf("Grid: (%u, %u, %u)\n", header.grid_dim[0], header.grid_dim[1], header.grid_dim[2]);

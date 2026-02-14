@@ -1,7 +1,7 @@
 // Test case to demonstrate divergence detection
 // Generates two traces with a known divergence point
 
-#include "../../lib/runtime/gddbg_runtime.h"
+#include "../../lib/runtime/prlx_runtime.h"
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstring>
@@ -15,7 +15,7 @@ __global__ void parametrized_kernel(int* data, int* out, int threshold, int n) {
     uint32_t operand_a = data[idx];
 
     // Record branch event
-    __gddbg_record_branch(0xDEADBEEF, condition, operand_a);
+    __prlx_record_branch(0xDEADBEEF, condition, operand_a);
 
     if (condition) {
         out[idx] = data[idx] * 2;
@@ -26,8 +26,8 @@ __global__ void parametrized_kernel(int* data, int* out, int threshold, int n) {
 
 void run_trace(const char* output_file, int threshold, int* h_data, int* h_out, int N) {
     // Set output path
-    setenv("GDDBG_TRACE", output_file, 1);
-    gddbg_init(); // Re-initialize to pick up new path
+    setenv("PRLX_TRACE", output_file, 1);
+    prlx_init(); // Re-initialize to pick up new path
 
     // Allocate device memory
     int *d_data, *d_out;
@@ -39,14 +39,14 @@ void run_trace(const char* output_file, int threshold, int* h_data, int* h_out, 
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
 
     // Pre-launch
-    gddbg_pre_launch("parametrized_kernel", gridDim, blockDim);
+    prlx_pre_launch("parametrized_kernel", gridDim, blockDim);
 
     // Launch kernel
     parametrized_kernel<<<gridDim, blockDim>>>(d_data, d_out, threshold, N);
     cudaDeviceSynchronize();
 
     // Post-launch
-    gddbg_post_launch();
+    prlx_post_launch();
 
     // Copy results
     cudaMemcpy(h_out, d_out, N * sizeof(int), cudaMemcpyDeviceToHost);
@@ -73,19 +73,19 @@ int main() {
 
     // Run A: threshold=50
     printf("Trace A: threshold=50\n");
-    run_trace("trace_a.gddbg", 50, h_data, h_out_a, N);
+    run_trace("trace_a.prlx", 50, h_data, h_out_a, N);
     printf("  -> Diverges at value=51 (taken)\n\n");
 
     // Run B: threshold=60
     printf("Trace B: threshold=60\n");
-    run_trace("trace_b.gddbg", 60, h_data, h_out_b, N);
+    run_trace("trace_b.prlx", 60, h_data, h_out_b, N);
     printf("  -> Diverges at value=51 (NOT taken)\n\n");
 
-    printf("SUCCESS: Generated traces trace_a.gddbg and trace_b.gddbg\n");
+    printf("SUCCESS: Generated traces trace_a.prlx and trace_b.prlx\n");
     printf("Expected divergence: Warp with idx=51 (warp 1)\n");
     printf("  Trace A: branch TAKEN (51 > 50)\n");
     printf("  Trace B: branch NOT-TAKEN (51 <= 60 is false, so 51 > 60 is the condition)\n");
-    printf("\nRun: ./differ/target/release/gddbg-diff trace_a.gddbg trace_b.gddbg\n");
+    printf("\nRun: ./differ/target/release/prlx-diff trace_a.prlx trace_b.prlx\n");
 
     delete[] h_data;
     delete[] h_out_a;

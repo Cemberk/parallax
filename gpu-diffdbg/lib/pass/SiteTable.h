@@ -1,5 +1,5 @@
-#ifndef GDDBG_SITE_TABLE_H
-#define GDDBG_SITE_TABLE_H
+#ifndef PRLX_SITE_TABLE_H
+#define PRLX_SITE_TABLE_H
 
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Instruction.h"
@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace gddbg {
+namespace prlx {
 
 struct SourceLocation {
     std::string filename;
@@ -62,6 +62,6 @@ private:
     std::unordered_map<std::string, uint32_t> ordinal_counters_;
 };
 
-} // namespace gddbg
+} // namespace prlx
 
-#endif // GDDBG_SITE_TABLE_H
+#endif // PRLX_SITE_TABLE_H

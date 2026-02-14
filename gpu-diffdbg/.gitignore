@@ -7,7 +7,7 @@ build/
 *.dll
 
 # Trace files
-*.gddbg
+*.prlx
 trace*.bin
 
 # CMake
@@ -42,3 +42,15 @@ Thumbs.db
 *.log
 *.out
 test_output/
+
+# Generated metadata
+prlx-sites.json
+
+# Distribution archives
+*.tar.gz
+
+# Python packaging
+*.egg-info/
+
+# Virtual environment
+.venv/

@@ -1,5 +1,5 @@
 [package]
-name = "gddbg-diff"
+name = "prlx-diff"
 version = "0.1.0"
 edition = "2021"
 
@@ -20,9 +20,9 @@ crossterm = "0.28"
 tempfile = "3.8"
 
 [lib]
-name = "gddbg_diff"
+name = "prlx_diff"
 path = "src/lib.rs"
 
 [[bin]]
-name = "gddbg-diff"
+name = "prlx-diff"
 path = "src/main.rs"

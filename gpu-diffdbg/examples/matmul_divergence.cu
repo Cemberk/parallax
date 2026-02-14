@@ -11,7 +11,7 @@
 //   - This validates that even without explicit shared memory tracing,
 //     the tool can catch data-dependent bugs via their control flow effects
 
-#include "../../lib/runtime/gddbg_runtime.h"
+#include "../../lib/runtime/prlx_runtime.h"
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cmath>
@@ -111,12 +111,12 @@ int main(int argc, char** argv) {
     printf("In BUGGY mode, thread 7 writes to wrong shared memory index.\n\n");
 
     printf("To test:\n");
-    printf("  Run A: GDDBG_TRACE=trace_a.gddbg ./matmul_divergence correct\n");
-    printf("  Run B: GDDBG_TRACE=trace_b.gddbg ./matmul_divergence buggy\n");
-    printf("  Diff:  gddbg diff trace_a.gddbg trace_b.gddbg\n\n");
+    printf("  Run A: PRLX_TRACE=trace_a.prlx ./matmul_divergence correct\n");
+    printf("  Run B: PRLX_TRACE=trace_b.prlx ./matmul_divergence buggy\n");
+    printf("  Diff:  prlx diff trace_a.prlx trace_b.prlx\n\n");
 
     // Initialize runtime
-    gddbg_init();
+    prlx_init();
 
     // Allocate host matrices
     float *h_A = new float[M * K];
@@ -146,14 +146,14 @@ int main(int argc, char** argv) {
     printf("Total warps: %d\n\n", gridDim.x * gridDim.y * ((blockDim.x * blockDim.y + 31) / 32));
 
     // Pre-launch
-    gddbg_pre_launch("matmul_kernel", gridDim, blockDim);
+    prlx_pre_launch("matmul_kernel", gridDim, blockDim);
 
     // Launch kernel
     matmul_kernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, inject_bug);
     cudaDeviceSynchronize();
 
     // Post-launch
-    gddbg_post_launch();
+    prlx_post_launch();
 
     // Copy results
     cudaMemcpy(h_C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
     delete[] h_B;
     delete[] h_C;
 
-    gddbg_shutdown();
+    prlx_shutdown();
 
     printf("\n");
     if (inject_bug) {

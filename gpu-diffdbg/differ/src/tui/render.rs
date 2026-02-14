@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use super::aligned::{event_type_short, AlignedRow, EventDisplay, RowDivergence};
 use super::app::{App, FocusPane, InputMode};
+use crate::differ::SnapshotContext;
 use crate::site_map::SiteMap;
 use crate::trace_format::HistoryEntry;
 
@@ -23,7 +24,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Vertical split: event panes | detail pane | status bar.
-    let detail_height = if app.aligned.has_history() { 18 } else { 10 };
+    let detail_height = if app.aligned.has_snapshot() {
+        24  // Extra room for per-lane operand table
+    } else if app.aligned.has_history() {
+        18
+    } else {
+        10
+    };
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -249,7 +256,26 @@ fn draw_detail_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     };
 
-    // Phase 2: append history (separate borrow, warp_view borrow is released)
+    // Phase 2: append snapshot context (per-lane operands) for branch divergences
+    if has_divergences && app.aligned.has_snapshot() {
+        // Find the matching divergence in diff_result to get snapshot data
+        let site_id = {
+            let view = app.aligned.warp_view(warp_idx);
+            view.rows.get(selected).and_then(|row| {
+                row.event_a.as_ref().map(|e| e.site_id)
+            })
+        };
+        if let Some(sid) = site_id {
+            let snap = app.aligned.diff_result.divergences.iter()
+                .find(|d| d.warp_idx == warp_idx && d.site_id == sid && d.snapshot.is_some())
+                .and_then(|d| d.snapshot.as_ref());
+            if let Some(snap) = snap {
+                format_snapshot_lines(&mut content, snap);
+            }
+        }
+    }
+
+    // Phase 3: append history (separate borrow, warp_view borrow is released)
     if has_divergences && app.aligned.has_history() {
         let (hist_a, hist_b) = app.aligned.get_history(warp_idx);
         let site_map = app.aligned.site_map.as_ref();
@@ -535,6 +561,64 @@ fn format_history_lines(
                 Span::styled(loc, Style::default().fg(Color::Green)),
             ]));
         }
+    }
+}
+
+/// Append per-lane operand snapshot lines to the detail content.
+fn format_snapshot_lines(lines: &mut Vec<Line<'static>>, snap: &SnapshotContext) {
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Per-Lane Operands:",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    // Header row
+    lines.push(Line::from(vec![
+        Span::styled("    Lane  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("A:lhs     ", Style::default().fg(Color::Cyan)),
+        Span::styled("A:rhs     ", Style::default().fg(Color::Cyan)),
+        Span::styled("B:lhs     ", Style::default().fg(Color::Magenta)),
+        Span::styled("B:rhs", Style::default().fg(Color::Magenta)),
+    ]));
+
+    let active_lanes = snap.mask_a | snap.mask_b;
+    let mut shown = 0;
+    for lane in 0..32u32 {
+        if (active_lanes >> lane) & 1 == 0 {
+            continue;
+        }
+        if shown >= 6 {
+            let remaining = (lane..32)
+                .filter(|l| (active_lanes >> l) & 1 != 0)
+                .count();
+            if remaining > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("    ... {} more active lanes", remaining),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            break;
+        }
+
+        let la = snap.lhs_a[lane as usize] as i32;
+        let ra = snap.rhs_a[lane as usize] as i32;
+        let lb = snap.lhs_b[lane as usize] as i32;
+        let rb = snap.rhs_b[lane as usize] as i32;
+        let differs = la != lb as i32 || ra != rb as i32;
+
+        let color = if differs { Color::Red } else { Color::White };
+        let marker = if differs { " <<<" } else { "" };
+
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "    {:>4}  {:<10}{:<10}{:<10}{}{}",
+                lane, la, ra, lb, rb, marker
+            ),
+            Style::default().fg(color),
+        )]));
+        shown += 1;
     }
 }
 

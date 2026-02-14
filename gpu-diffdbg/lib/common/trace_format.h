@@ -1,5 +1,5 @@
-#ifndef GDDBG_TRACE_FORMAT_H
-#define GDDBG_TRACE_FORMAT_H
+#ifndef PRLX_TRACE_FORMAT_H
+#define PRLX_TRACE_FORMAT_H
 
 #include <stdint.h>
 
@@ -8,22 +8,26 @@ extern "C" {
 #endif
 
 // Magic number for trace file format
-#define GDDBG_MAGIC 0x4744444247504400ULL  // "GDDBGGPU\0"
+#define PRLX_MAGIC 0x50524C5800000000ULL  // "PRLX\0\0\0\0"
 
 // Trace format version
-#define GDDBG_VERSION 1
+#define PRLX_VERSION 1
 
 // Default configuration
-#define GDDBG_EVENTS_PER_WARP 4096
+#define PRLX_EVENTS_PER_WARP 4096
 
 // Header flags
-#define GDDBG_FLAG_COMPACT  0x1   // Bit 0: compact event format
-#define GDDBG_FLAG_COMPRESS 0x2   // Bit 1: zstd compressed
-#define GDDBG_FLAG_HISTORY  0x4   // Bit 2: history ring section appended
-#define GDDBG_FLAG_SAMPLED  0x8   // Bit 3: sampling was active (sample_rate > 1)
+#define PRLX_FLAG_COMPACT  0x1   // Bit 0: compact event format
+#define PRLX_FLAG_COMPRESS 0x2   // Bit 1: zstd compressed
+#define PRLX_FLAG_HISTORY  0x4   // Bit 2: history ring section appended
+#define PRLX_FLAG_SAMPLED  0x8   // Bit 3: sampling was active (sample_rate > 1)
+#define PRLX_FLAG_SNAPSHOT 0x10  // Bit 4: snapshot section appended (per-lane operands)
 
 // History (time-travel) defaults
-#define GDDBG_HISTORY_DEPTH_DEFAULT 64
+#define PRLX_HISTORY_DEPTH_DEFAULT 64
+
+// Snapshot (crash dump) defaults
+#define PRLX_SNAPSHOT_DEPTH_DEFAULT 32
 
 // Event types
 #define EVENT_BRANCH      0
@@ -65,9 +69,9 @@ typedef struct {
 
 // File header (160 bytes - must be multiple of 16 for alignment)
 typedef struct {
-    uint64_t magic;             // GDDBG_MAGIC
-    uint32_t version;           // GDDBG_VERSION
-    uint32_t flags;             // GDDBG_FLAG_* bitmask
+    uint64_t magic;             // PRLX_MAGIC
+    uint32_t version;           // PRLX_VERSION
+    uint32_t flags;             // PRLX_FLAG_* bitmask
 
     // Kernel identification
     uint64_t kernel_name_hash;
@@ -85,18 +89,19 @@ typedef struct {
     uint32_t cuda_arch;         // e.g., 80 for SM_80
 
     // History / sampling / reserved fields (20 bytes to reach 160 total)
-    // When GDDBG_FLAG_HISTORY is set:
+    // When PRLX_FLAG_HISTORY is set:
     //   history_depth: entries per warp in the history ring buffer
     //   history_section_offset: byte offset from file start to history data
     //     (0 = immediately after warp event buffers)
     uint32_t history_depth;             // [0] History entries per warp (0 = no history)
     uint32_t history_section_offset;    // [1] Byte offset to history section (0 = auto)
     uint32_t sample_rate;              // [2] Sampling rate (1 = record all, N = record 1/N)
-    uint32_t _reserved[2];            // [3-4] Padding to make 160 bytes
+    uint32_t snapshot_depth;           // [3] Snapshot entries per warp (0 = no snapshots)
+    uint32_t snapshot_section_offset;  // [4] Byte offset to snapshot section (0 = auto)
 } TraceFileHeader;
 
 // ---- History (Time-Travel) Structures ----
-// Appended after all warp event buffers when GDDBG_FLAG_HISTORY is set.
+// Appended after all warp event buffers when PRLX_FLAG_HISTORY is set.
 // Layout per warp: [HistoryRingHeader][HistoryEntry * depth]
 
 // Per-warp history ring header (16 bytes)
@@ -115,6 +120,32 @@ typedef struct __attribute__((aligned(16))) {
     uint32_t _pad;          // Alignment padding
 } HistoryEntry;
 
+// ---- Snapshot (Crash Dump) Structures ----
+// Appended after history section (or warp event buffers if no history)
+// when PRLX_FLAG_SNAPSHOT is set.
+// Layout per warp: [SnapshotRingHeader][SnapshotEntry * depth]
+// Captures per-lane comparison operands at branch divergence sites.
+
+// Per-warp snapshot ring header (16 bytes)
+typedef struct {
+    uint32_t write_idx;     // Current write position (wraps via modulo)
+    uint32_t depth;         // Ring capacity (same as TraceFileHeader.snapshot_depth)
+    uint32_t total_writes;  // Monotonic counter (detects wrap)
+    uint32_t _reserved;
+} SnapshotRingHeader;
+
+// Per-lane comparison operand snapshot (288 bytes = 18 * 16, aligned for v4.u32)
+// Captures both operands of ICmpInst/FCmpInst for all 32 lanes via __shfl_sync
+typedef struct __attribute__((aligned(16))) {
+    uint32_t site_id;           // 4B - links back to the branch event
+    uint32_t active_mask;       // 4B - which lanes were active
+    uint32_t seq;               // 4B - monotonic sequence for ordering
+    uint32_t cmp_predicate;     // 4B - ICmp/FCmp predicate enum value
+    uint32_t lhs_values[32];    // 128B - per-lane LHS operand
+    uint32_t rhs_values[32];    // 128B - per-lane RHS operand
+    uint32_t _pad[4];           // 16B - pad to 288 = 18 * 16
+} SnapshotEntry;
+
 // Site table entry
 typedef struct {
     uint32_t site_id;
@@ -130,4 +161,4 @@ typedef struct {
 }
 #endif
 
-#endif // GDDBG_TRACE_FORMAT_H
+#endif // PRLX_TRACE_FORMAT_H

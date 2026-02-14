@@ -2,10 +2,10 @@
 
 use colored::*;
 
-use crate::differ::{DiffResult, Divergence, DivergenceKind};
+use crate::differ::{DiffResult, Divergence, DivergenceKind, SnapshotContext};
 use crate::parser::TraceFile;
 use crate::site_map::SiteMap;
-use crate::trace_format::GDDBG_FLAG_SAMPLED;
+use crate::trace_format::{PRLX_FLAG_SAMPLED, PRLX_FLAG_SNAPSHOT};
 
 /// Print a summary of the diff result
 pub fn print_summary(result: &DiffResult) {
@@ -103,7 +103,7 @@ pub fn print_divergences(result: &DiffResult, max_shown: usize, site_map: Option
     }
 }
 
-/// Print a single divergence
+/// Print a single divergence (with optional snapshot context)
 fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>) {
     print!("  Warp {} @ event {}: ", div.warp_idx, div.event_idx);
 
@@ -185,6 +185,84 @@ fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>) {
             }
         }
     }
+
+    // Print per-lane operand snapshot if available
+    if let Some(ref snap) = div.snapshot {
+        print_snapshot_context(snap);
+    }
+}
+
+/// Print per-lane operand snapshot table
+fn print_snapshot_context(snap: &SnapshotContext) {
+    let pred_str = icmp_predicate_str(snap.cmp_predicate);
+    println!(
+        "    {}",
+        format!("Per-Lane Operand Snapshot ({}):", pred_str)
+            .white()
+            .bold()
+    );
+    println!(
+        "    {:>4}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "Lane".dimmed(),
+        "A:lhs".cyan(),
+        "A:rhs".cyan(),
+        "B:lhs".magenta(),
+        "B:rhs".magenta()
+    );
+
+    let active_lanes: u32 = snap.mask_a | snap.mask_b;
+    for lane in 0..32u32 {
+        if (active_lanes >> lane) & 1 == 0 {
+            continue; // Skip inactive lanes
+        }
+
+        let differs = snap.lhs_a[lane as usize] != snap.lhs_b[lane as usize]
+            || snap.rhs_a[lane as usize] != snap.rhs_b[lane as usize];
+
+        let marker = if differs { " <<<" } else { "" };
+        let line = format!(
+            "    {:>4}  {:>10}  {:>10}  {:>10}  {:>10}{}",
+            lane,
+            format_i32(snap.lhs_a[lane as usize]),
+            format_i32(snap.rhs_a[lane as usize]),
+            format_i32(snap.lhs_b[lane as usize]),
+            format_i32(snap.rhs_b[lane as usize]),
+            marker,
+        );
+
+        if differs {
+            println!("{}", line.red());
+        } else {
+            println!("{}", line);
+        }
+    }
+}
+
+/// Format u32 as signed i32 for readable display
+fn format_i32(v: u32) -> String {
+    format!("{}", v as i32)
+}
+
+/// Get human-readable ICmp predicate string
+fn icmp_predicate_str(pred: u32) -> &'static str {
+    match pred {
+        32 => "icmp eq",
+        33 => "icmp ne",
+        34 => "icmp ugt",
+        35 => "icmp uge",
+        36 => "icmp ult",
+        37 => "icmp ule",
+        38 => "icmp sgt",
+        39 => "icmp sge",
+        40 => "icmp slt",
+        41 => "icmp sle",
+        // FCmp predicates
+        1 => "fcmp oeq",
+        2 => "fcmp ogt",
+        4 => "fcmp olt",
+        14 => "fcmp une",
+        _ => "cmp",
+    }
 }
 
 /// Print history context for divergences (time-travel)
@@ -205,7 +283,7 @@ pub fn print_history_context(
     if !has_hist_a && !has_hist_b {
         println!(
             "\n{}",
-            "No history data. Set GDDBG_HISTORY_DEPTH=64 to enable time-travel."
+            "No history data. Set PRLX_HISTORY_DEPTH=64 to enable time-travel."
                 .dimmed()
         );
         return;
@@ -307,11 +385,17 @@ pub fn print_trace_info(name: &str, trace: &TraceFile) {
     println!("Overflows:  {}", trace.total_overflows());
     println!("Timestamp:  {}", header.timestamp);
     println!("CUDA Arch:  SM_{}", header.cuda_arch);
-    if header.flags & GDDBG_FLAG_SAMPLED != 0 {
+    if header.flags & PRLX_FLAG_SAMPLED != 0 {
         println!(
             "Sampling:   1/{} (~{:.1}% of events recorded)",
             header.sample_rate,
             100.0 / header.sample_rate as f64
+        );
+    }
+    if header.flags & PRLX_FLAG_SNAPSHOT != 0 {
+        println!(
+            "Snapshots:  depth={} (per-lane operand capture)",
+            header.snapshot_depth
         );
     }
 }

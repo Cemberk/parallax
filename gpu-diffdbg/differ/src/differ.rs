@@ -43,6 +43,18 @@ pub enum DivergenceKind {
     ExtraEvents { count: usize, in_trace_b: bool },
 }
 
+/// Per-lane comparison operand snapshot context for a divergence
+#[derive(Debug, Clone)]
+pub struct SnapshotContext {
+    pub cmp_predicate: u32,
+    pub mask_a: u32,
+    pub mask_b: u32,
+    pub lhs_a: [u32; 32],
+    pub rhs_a: [u32; 32],
+    pub lhs_b: [u32; 32],
+    pub rhs_b: [u32; 32],
+}
+
 /// A detected divergence between two traces
 #[derive(Debug, Clone)]
 pub struct Divergence {
@@ -50,6 +62,8 @@ pub struct Divergence {
     pub event_idx: usize,
     pub site_id: u32,
     pub kind: DivergenceKind,
+    /// Per-lane operand snapshot (present when snapshot section available)
+    pub snapshot: Option<SnapshotContext>,
 }
 
 /// Result of differential analysis
@@ -158,6 +172,47 @@ pub fn diff_traces_with_remap(
     // Flatten and potentially limit divergences
     let mut divergences: Vec<Divergence> = all_divergences.into_iter().flatten().collect();
 
+    // Enrich branch/mask divergences with snapshot data (per-lane operands)
+    let has_snap_a = trace_a.has_snapshot();
+    let has_snap_b = trace_b.has_snapshot();
+    if has_snap_a || has_snap_b {
+        for div in &mut divergences {
+            match &div.kind {
+                DivergenceKind::Branch { .. } | DivergenceKind::ActiveMask { .. } => {
+                    let snap_a = if has_snap_a {
+                        trace_a
+                            .get_snapshot_for_site(div.warp_idx as usize, div.site_id)
+                            .unwrap_or(None)
+                    } else {
+                        None
+                    };
+                    let snap_b = if has_snap_b {
+                        trace_b
+                            .get_snapshot_for_site(div.warp_idx as usize, div.site_id)
+                            .unwrap_or(None)
+                    } else {
+                        None
+                    };
+
+                    if snap_a.is_some() || snap_b.is_some() {
+                        let pred = snap_a.as_ref().or(snap_b.as_ref())
+                            .map(|s| s.cmp_predicate).unwrap_or(0);
+                        div.snapshot = Some(SnapshotContext {
+                            cmp_predicate: pred,
+                            mask_a: snap_a.as_ref().map(|s| s.active_mask).unwrap_or(0),
+                            mask_b: snap_b.as_ref().map(|s| s.active_mask).unwrap_or(0),
+                            lhs_a: snap_a.as_ref().map(|s| s.lhs_values).unwrap_or([0; 32]),
+                            rhs_a: snap_a.as_ref().map(|s| s.rhs_values).unwrap_or([0; 32]),
+                            lhs_b: snap_b.as_ref().map(|s| s.lhs_values).unwrap_or([0; 32]),
+                            rhs_b: snap_b.as_ref().map(|s| s.rhs_values).unwrap_or([0; 32]),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     let warps_diverged = divergences
         .iter()
         .map(|d| d.warp_idx)
@@ -256,6 +311,7 @@ fn diff_single_warp(
                         dir_a: evt_a.branch_dir,
                         dir_b: evt_b.branch_dir,
                     },
+                    snapshot: None,
                 });
             }
 
@@ -269,6 +325,7 @@ fn diff_single_warp(
                         mask_a: evt_a.active_mask,
                         mask_b: evt_b.active_mask,
                     },
+                    snapshot: None,
                 });
             }
 
@@ -282,6 +339,7 @@ fn diff_single_warp(
                         val_a: evt_a.value_a,
                         val_b: evt_b.value_a,
                     },
+                    snapshot: None,
                 });
             }
 
@@ -320,6 +378,7 @@ fn diff_single_warp(
                             count: k,
                             in_trace_b: false,
                         },
+                        snapshot: None,
                     });
                     i_a += k; // Skip extra events in A
                 }
@@ -333,6 +392,7 @@ fn diff_single_warp(
                             count: k,
                             in_trace_b: true,
                         },
+                        snapshot: None,
                     });
                     i_b += k; // Skip extra events in B
                 }
@@ -347,6 +407,7 @@ fn diff_single_warp(
                                 count: k_a,
                                 in_trace_b: false,
                             },
+                            snapshot: None,
                         });
                         i_a += k_a;
                     } else {
@@ -358,6 +419,7 @@ fn diff_single_warp(
                                 count: k_b,
                                 in_trace_b: true,
                             },
+                            snapshot: None,
                         });
                         i_b += k_b;
                     }
@@ -372,6 +434,7 @@ fn diff_single_warp(
                             site_a: evt_a.site_id,
                             site_b: evt_b.site_id,
                         },
+                        snapshot: None,
                     });
                     // Stop comparing this warp - paths have truly diverged
                     break;
@@ -390,6 +453,7 @@ fn diff_single_warp(
                 count: events_a.len() - i_a,
                 in_trace_b: false,
             },
+            snapshot: None,
         });
     } else if i_b < events_b.len() {
         divergences.push(Divergence {
@@ -400,6 +464,7 @@ fn diff_single_warp(
                 count: events_b.len() - i_b,
                 in_trace_b: true,
             },
+            snapshot: None,
         });
     }
 
