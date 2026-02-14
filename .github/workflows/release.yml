@@ -48,12 +48,12 @@ jobs:
       - name: Build wheel
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          pip3 install --break-system-packages build setuptools wheel
+          # Need wheel>=0.40 for the 'tags' subcommand (Ubuntu ships 0.37)
+          pip3 install build setuptools 'wheel>=0.40'
           bash scripts/build_wheel.sh
 
       - name: Retag wheel as manylinux
         run: |
-          pip3 install --break-system-packages wheel
           # Retag linux_x86_64 -> manylinux_2_28_x86_64
           # Our .so files are LLVM/CUDA plugins that use host libs, so we
           # don't auditwheel (which would try to bundle LLVM+CUDA = gigabytes).
@@ -63,7 +63,7 @@ jobs:
 
       - name: Verify wheel contents
         run: |
-          pip3 install --break-system-packages dist/*.whl
+          pip3 install dist/*.whl
           python3 -c "import prlx; print('Version:', prlx.__version__)"
           python3 -c "from prlx._find_lib import find_differ_binary; assert find_differ_binary(), 'prlx-diff not found'"
           python3 -c "from prlx._find_lib import find_pass_plugin; print('Pass:', find_pass_plugin())"
