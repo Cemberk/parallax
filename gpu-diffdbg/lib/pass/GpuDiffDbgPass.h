@@ -53,6 +53,12 @@ private:
     // Instrument value captures for loads feeding branch conditions (time-travel)
     void instrumentValueCaptures(llvm::BranchInst* BI, SiteTable& siteTable, llvm::Module& M);
 
+    // Instrument predicated comparisons (Triton's pattern: icmp/fcmp feeding
+    // inline asm predicates instead of branches). Semantically equivalent to
+    // branch instrumentation.
+    void instrumentPredicatedOps(std::vector<llvm::CmpInst*>& predicates,
+                                 SiteTable& siteTable, llvm::Module& M);
+
     // Embed site table as global constant in the module
     void embedSiteTable(llvm::Module& M, const SiteTable& siteTable);
 

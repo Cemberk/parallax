@@ -2,7 +2,8 @@
 GPU DiffDbg - Differential debugger for CUDA/Triton GPU kernels.
 
 Public API:
-    integrate_with_triton()  - Hook into Triton's compilation pipeline
+    enable()                 - Hook into Triton's compilation pipeline
+    integrate_with_triton()  - Alias for enable()
     read_trace(path)         - Read a .gddbg trace file
     diff_traces(a, b)        - Compare two trace files using the Rust differ
 """
@@ -13,10 +14,34 @@ from .trace_reader import read_trace, TraceData
 from ._find_lib import find_differ_binary
 
 
-def integrate_with_triton():
-    """Install the gpu-diffdbg instrumentation hook into Triton's compiler."""
+def enable(**kwargs):
+    """
+    Enable gpu-diffdbg instrumentation for Triton kernels.
+
+    This intercepts Triton's compilation pipeline to inject the gpu-diffdbg
+    LLVM instrumentation pass, and wraps kernel launches with trace buffer
+    management hooks.
+
+    Usage:
+        import gddbg
+        gddbg.enable()
+
+        @triton.jit
+        def my_kernel(...):
+            ...
+        # All subsequent Triton kernels are automatically instrumented.
+
+    Args:
+        pass_plugin: Explicit path to libGpuDiffDbgPass.so.
+        verbose: Print status messages (default True).
+    """
     from .triton_hook import install
-    install()
+    install(**kwargs)
+
+
+def integrate_with_triton(**kwargs):
+    """Alias for enable(). Hook into Triton's compilation pipeline."""
+    enable(**kwargs)
 
 
 def diff_traces(trace_a: str, trace_b: str, **kwargs) -> int:

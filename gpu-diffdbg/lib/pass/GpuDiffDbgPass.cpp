@@ -401,6 +401,59 @@ void GpuDiffDbgPass::instrumentValueCaptures(BranchInst* BI, SiteTable& siteTabl
     }
 }
 
+void GpuDiffDbgPass::instrumentPredicatedOps(
+    std::vector<CmpInst*>& predicates, SiteTable& siteTable, Module& M) {
+    // Triton fully eliminates branches by lowering them to predicated PTX
+    // instructions via inline asm. Example Triton IR:
+    //
+    //   %pred = icmp slt i32 %idx, %n_elements
+    //   call i32 asm sideeffect "@$2 ld.global.b32 ...", "=r,l,b"(..., i1 %pred)
+    //   call void asm sideeffect "@$2 st.global.b32 ...", "r,l,b"(..., i1 %pred)
+    //
+    // These predicated loads/stores are semantically equivalent to:
+    //   if (idx < n_elements) { *out = *a + *b; }
+    //
+    // We instrument the comparison that produces the predicate, recording
+    // the same EVENT_BRANCH data so the differ treats predicate divergence
+    // identically to branch divergence.
+
+    LLVMContext& Ctx = M.getContext();
+
+    for (CmpInst* CI : predicates) {
+        // Insert instrumentation AFTER the comparison
+        Instruction* InsertPt = CI->getNextNonDebugInstruction();
+        if (!InsertPt) continue;
+
+        IRBuilder<> Builder(InsertPt);
+
+        uint32_t site_id = siteTable.getSiteId(CI, EVENT_BRANCH);
+
+        // Comparison result as i32 (0 or 1)
+        Value* CondI32 = Builder.CreateZExt(CI, Type::getInt32Ty(Ctx));
+
+        // Capture left-hand operand of the comparison
+        Value* OperandA = ConstantInt::get(Type::getInt32Ty(Ctx), 0);
+        Value* LHS = CI->getOperand(0);
+        if (LHS->getType()->isIntegerTy()) {
+            if (LHS->getType()->getIntegerBitWidth() <= 32) {
+                OperandA = Builder.CreateZExtOrTrunc(LHS, Type::getInt32Ty(Ctx));
+            }
+        } else if (LHS->getType()->isFloatTy()) {
+            OperandA = Builder.CreateBitCast(LHS, Type::getInt32Ty(Ctx));
+        } else if (LHS->getType()->isDoubleTy()) {
+            Value* AsI64 = Builder.CreateBitCast(LHS, Type::getInt64Ty(Ctx));
+            OperandA = Builder.CreateTrunc(AsI64, Type::getInt32Ty(Ctx));
+        }
+
+        CallInst* RecordCall = Builder.CreateCall(record_branch_fn_, {
+            ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
+            CondI32,
+            OperandA
+        });
+        RecordCall->addFnAttr(Attribute::Convergent);
+    }
+}
+
 void GpuDiffDbgPass::embedSiteTable(Module& M, const SiteTable& siteTable) {
     // Export site table to JSON file
     // The differ will read this file to map site_ids to source locations
@@ -467,23 +520,29 @@ PreservedAnalyses GpuDiffDbgPass::run(Module& M, ModuleAnalysisManager& AM) {
             continue;
         }
 
-        errs() << "[gddbg]   Instrumenting function: " << F.getName() << "\n";
+        errs() << "[gddbg]   Instrumenting function: " << F.getName() << " ("
+               << F.size() << " blocks)\n";
 
         // Collect instructions to instrument (to avoid iterator invalidation)
         std::vector<BranchInst*> branches;
         std::vector<StoreInst*> shmem_stores;
         std::vector<AtomicRMWInst*> atomics;
         std::vector<AtomicCmpXchgInst*> cmpxchgs;
+        std::vector<CmpInst*> predicates;
+
+        // Track comparisons that already feed branches (to avoid double-recording)
+        std::set<Value*> branchConditions;
 
         for (BasicBlock& BB : F) {
             // Collect branch instructions (terminators)
             if (auto* BI = dyn_cast<BranchInst>(BB.getTerminator())) {
                 if (BI->isConditional()) {
                     branches.push_back(BI);
+                    branchConditions.insert(BI->getCondition());
                 }
             }
 
-            // Collect shared memory stores and atomics
+            // Collect shared memory stores, atomics, and predicated comparisons
             for (Instruction& I : BB) {
                 if (auto* SI = dyn_cast<StoreInst>(&I)) {
                     if (SI->getPointerAddressSpace() == 3) {  // Shared memory
@@ -493,8 +552,32 @@ PreservedAnalyses GpuDiffDbgPass::run(Module& M, ModuleAnalysisManager& AM) {
                 if (auto* AI = dyn_cast<AtomicRMWInst>(&I)) {
                     atomics.push_back(AI);
                 }
-                if (auto* CI = dyn_cast<AtomicCmpXchgInst>(&I)) {
-                    cmpxchgs.push_back(CI);
+                if (auto* CXI = dyn_cast<AtomicCmpXchgInst>(&I)) {
+                    cmpxchgs.push_back(CXI);
+                }
+
+                // Collect comparisons used as predicates in inline asm or select
+                // (Triton's predicated execution pattern). Skip comparisons that
+                // already feed branch instructions — those are handled above.
+                if (auto* CI = dyn_cast<CmpInst>(&I)) {
+                    if (branchConditions.count(CI)) continue;
+
+                    bool isPredicate = false;
+                    for (User* U : CI->users()) {
+                        if (auto* Call = dyn_cast<CallInst>(U)) {
+                            if (Call->isInlineAsm()) {
+                                isPredicate = true;
+                                break;
+                            }
+                        }
+                        if (isa<SelectInst>(U)) {
+                            isPredicate = true;
+                            break;
+                        }
+                    }
+                    if (isPredicate) {
+                        predicates.push_back(CI);
+                    }
                 }
             }
         }
@@ -504,14 +587,15 @@ PreservedAnalyses GpuDiffDbgPass::run(Module& M, ModuleAnalysisManager& AM) {
             instrumentBranch(BI, siteTable, M);
             instrumentValueCaptures(BI, siteTable, M);  // Time-travel history
         }
+        instrumentPredicatedOps(predicates, siteTable, M);
         for (auto* SI : shmem_stores) {
             instrumentSharedMemStore(SI, siteTable, M);
         }
         for (auto* AI : atomics) {
             instrumentAtomic(AI, siteTable, M);
         }
-        for (auto* CI : cmpxchgs) {
-            instrumentCmpXchg(CI, siteTable, M);
+        for (auto* CXI : cmpxchgs) {
+            instrumentCmpXchg(CXI, siteTable, M);
         }
     }
 
@@ -535,7 +619,11 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
         [](PassBuilder& PB) {
             // Register pass to run automatically in optimization pipeline
             PB.registerOptimizerEarlyEPCallback(
-                [](ModulePassManager& MPM, OptimizationLevel OL) {
+                [](ModulePassManager& MPM, OptimizationLevel OL
+#if LLVM_VERSION_MAJOR >= 20
+                   , ThinOrFullLTOPhase
+#endif
+                  ) {
                     MPM.addPass(gddbg::GpuDiffDbgPass());
                 });
 

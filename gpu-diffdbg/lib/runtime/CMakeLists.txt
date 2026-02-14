@@ -57,6 +57,45 @@ set_target_properties(gddbg_runtime_shared PROPERTIES
     OUTPUT_NAME "gddbg_runtime_shared"
 )
 
+# NVPTX bitcode for Triton integration (device-only runtime)
+# Compiled with the highest available clang to match Triton's LLVM IR format.
+# Prefer clang-20 (closer to Triton's bundled LLVM 22), fall back to clang-18.
+set(GDDBG_CLANG "")
+foreach(_CLANG_VER clang++-20 clang++-18)
+    if(NOT GDDBG_CLANG)
+        find_program(_FOUND_CLANG ${_CLANG_VER})
+        if(_FOUND_CLANG)
+            set(GDDBG_CLANG ${_FOUND_CLANG})
+        endif()
+        unset(_FOUND_CLANG CACHE)
+    endif()
+endforeach()
+
+if(GDDBG_CLANG)
+    set(GDDBG_RUNTIME_BC "${CMAKE_CURRENT_BINARY_DIR}/gddbg_runtime_nvptx.bc")
+    add_custom_command(
+        OUTPUT ${GDDBG_RUNTIME_BC}
+        COMMAND ${GDDBG_CLANG}
+            --cuda-device-only
+            --cuda-gpu-arch=sm_80
+            -emit-llvm -c
+            -fcuda-flush-denormals-to-zero
+            -I${CMAKE_CURRENT_SOURCE_DIR}
+            -I${CMAKE_CURRENT_SOURCE_DIR}/../common
+            ${CMAKE_CURRENT_SOURCE_DIR}/gddbg_runtime.cu
+            -o ${GDDBG_RUNTIME_BC}
+        DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/gddbg_runtime.cu
+            ${CMAKE_CURRENT_SOURCE_DIR}/gddbg_runtime.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/../common/trace_format.h
+        COMMENT "Building NVPTX bitcode for Triton integration (${GDDBG_CLANG})"
+    )
+    add_custom_target(gddbg_runtime_bitcode ALL DEPENDS ${GDDBG_RUNTIME_BC})
+    message(STATUS "NVPTX bitcode target enabled (${GDDBG_CLANG})")
+else()
+    message(STATUS "No suitable clang found, NVPTX bitcode target disabled")
+endif()
+
 # Installation
 install(TARGETS gddbg_runtime gddbg_runtime_shared
     LIBRARY DESTINATION lib

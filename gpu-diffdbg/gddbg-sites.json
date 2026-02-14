@@ -1,90 +1,66 @@
 [
   {
-    "site_id": 3102672146,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 22,
-    "column": 9,
-    "event_type": 0
-  },
-  {
-    "site_id": 3102672146,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 22,
-    "column": 9,
-    "event_type": 0
-  },
-  {
-    "site_id": 882402968,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 22,
-    "column": 16,
-    "event_type": 0
-  },
-  {
-    "site_id": 3759281677,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 27,
-    "column": 5,
-    "event_type": 0
-  },
-  {
-    "site_id": 1545623495,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 27,
+    "site_id": 2983372149,
+    "filename": "test_gddbg_triton.py",
+    "function": "add_kernel",
+    "line": 30,
     "column": 21,
     "event_type": 0
   },
   {
-    "site_id": 2695691979,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 27,
-    "column": 25,
+    "site_id": 2983372149,
+    "filename": "test_gddbg_triton.py",
+    "function": "add_kernel",
+    "line": 30,
+    "column": 21,
     "event_type": 0
   },
   {
-    "site_id": 2023361376,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 29,
-    "column": 13,
+    "site_id": 2983372149,
+    "filename": "test_gddbg_triton.py",
+    "function": "add_kernel",
+    "line": 30,
+    "column": 21,
     "event_type": 0
   },
   {
-    "site_id": 2023361376,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 29,
-    "column": 13,
+    "site_id": 2983372149,
+    "filename": "test_gddbg_triton.py",
+    "function": "add_kernel",
+    "line": 30,
+    "column": 21,
     "event_type": 0
   },
   {
-    "site_id": 795027408,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 36,
-    "column": 13,
+    "site_id": 2983372149,
+    "filename": "test_gddbg_triton.py",
+    "function": "add_kernel",
+    "line": 30,
+    "column": 21,
     "event_type": 0
   },
   {
-    "site_id": 4057889970,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 44,
-    "column": 9,
+    "site_id": 2983372149,
+    "filename": "test_gddbg_triton.py",
+    "function": "add_kernel",
+    "line": 30,
+    "column": 21,
     "event_type": 0
   },
   {
-    "site_id": 4057889970,
-    "filename": "./examples/loop_divergence.cu",
-    "function": "_Z11loop_kernelPiS_ii",
-    "line": 44,
-    "column": 9,
+    "site_id": 2983372149,
+    "filename": "test_gddbg_triton.py",
+    "function": "add_kernel",
+    "line": 30,
+    "column": 21,
+    "event_type": 0
+  },
+  {
+    "site_id": 2983372149,
+    "filename": "test_gddbg_triton.py",
+    "function": "add_kernel",
+    "line": 30,
+    "column": 21,
     "event_type": 0
   }
 ]

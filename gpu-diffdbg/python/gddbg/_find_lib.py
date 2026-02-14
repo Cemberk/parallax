@@ -2,12 +2,15 @@
 Library and binary discovery for gpu-diffdbg components.
 
 Searches for:
-    - libGpuDiffDbgPass.so   (LLVM pass plugin)
-    - libgddbg_runtime.so    (shared runtime library)
-    - gddbg-diff             (Rust differ binary)
+    - libGpuDiffDbgPass.so       (LLVM pass plugin)
+    - libgddbg_runtime.so        (shared runtime library)
+    - gddbg_runtime_nvptx.bc     (NVPTX bitcode for Triton linking)
+    - gddbg-diff                 (Rust differ binary)
+    - opt-18 / llvm-link-18      (LLVM tools for pass pipeline)
 """
 
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -65,6 +68,49 @@ def find_runtime_library() -> Optional[Path]:
         if c.exists():
             return c.resolve()
 
+    return None
+
+
+def find_runtime_bitcode() -> Optional[Path]:
+    """Find the NVPTX bitcode for Triton linking."""
+    candidates = []
+
+    home = os.environ.get("GPU_DIFFDBG_HOME")
+    if home:
+        candidates.append(Path(home) / "lib" / "gddbg_runtime_nvptx.bc")
+        candidates.append(
+            Path(home) / "build" / "lib" / "runtime" / "gddbg_runtime_nvptx.bc"
+        )
+
+    root = _project_root()
+    candidates.extend([
+        root / "build" / "lib" / "runtime" / "gddbg_runtime_nvptx.bc",
+    ])
+
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+
+    return None
+
+
+def find_opt_binary() -> Optional[Path]:
+    """Find opt (LLVM optimizer) for running the instrumentation pass.
+    Prefers LLVM 20 (closest to Triton's bundled LLVM), falls back to 18."""
+    for name in ("opt-20", "opt-18", "opt"):
+        path = shutil.which(name)
+        if path:
+            return Path(path)
+    return None
+
+
+def find_llvm_link_binary() -> Optional[Path]:
+    """Find llvm-link for linking NVPTX bitcode modules.
+    Prefers LLVM 20, falls back to 18."""
+    for name in ("llvm-link-20", "llvm-link-18", "llvm-link"):
+        path = shutil.which(name)
+        if path:
+            return Path(path)
     return None
 
 

@@ -33,22 +33,30 @@ else()
 endif()
 
 # Find LLVM (for the pass)
-# Accept any LLVM installation, then check version
-find_package(LLVM CONFIG)
-if(LLVM_FOUND)
-    if(LLVM_VERSION_MAJOR EQUAL 18)
-        message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
-        message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-        set(BUILD_LLVM_PASS ON)
-    else()
-        message(WARNING "Found LLVM ${LLVM_PACKAGE_VERSION}, but need version 18.x")
-        message(WARNING "Runtime and tests will still be built.")
-        set(BUILD_LLVM_PASS OFF)
+# Prefer LLVM 20 (closest to Triton's bundled LLVM 22), then 18 as fallback
+set(BUILD_LLVM_PASS OFF)
+foreach(_LLVM_VER 20 18)
+    if(NOT BUILD_LLVM_PASS)
+        # Don't pass version to find_package — LLVM's cmake version compatibility
+        # checks are too strict. We verify the major version ourselves.
+        unset(LLVM_FOUND CACHE)
+        unset(LLVM_DIR CACHE)
+        find_package(LLVM CONFIG
+            PATHS "/usr/lib/llvm-${_LLVM_VER}/cmake"
+            NO_DEFAULT_PATH
+        )
+        if(LLVM_FOUND AND LLVM_VERSION_MAJOR EQUAL ${_LLVM_VER})
+            message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+            message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+            set(BUILD_LLVM_PASS ON)
+            set(GDDBG_LLVM_VERSION ${_LLVM_VER})
+        endif()
     endif()
-else()
-    message(WARNING "LLVM not found. LLVM pass will not be built.")
+endforeach()
+
+if(NOT BUILD_LLVM_PASS)
+    message(WARNING "LLVM 20 or 18 not found. LLVM pass will not be built.")
     message(WARNING "Runtime and tests will still be built.")
-    set(BUILD_LLVM_PASS OFF)
 endif()
 
 # Build runtime library
