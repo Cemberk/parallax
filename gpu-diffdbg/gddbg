@@ -133,6 +133,8 @@ def cmd_diff(args):
         cmd.extend(["--lookahead", str(args.lookahead)])
     if args.max_shown:
         cmd.extend(["-n", str(args.max_shown)])
+    if hasattr(args, 'tui') and args.tui:
+        cmd.append("--tui")
 
     # Execute differ
     return subprocess.call(cmd)
@@ -224,6 +226,7 @@ def cmd_check(args):
                 self.limit = args.limit
                 self.lookahead = args.lookahead
                 self.max_shown = args.max_shown
+                self.tui = getattr(args, 'tui', False)
 
         diff_args = DiffArgs()
         return cmd_diff(diff_args)
@@ -261,6 +264,7 @@ Examples:
     parser_diff.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser_diff.add_argument("-l", "--limit", type=int, help="Max divergences to collect")
     parser_diff.add_argument("--lookahead", type=int, help="Lookahead window size")
+    parser_diff.add_argument("--tui", action="store_true", help="Launch interactive TUI viewer")
 
     # run command
     parser_run = subparsers.add_parser("run", help="Run a binary with tracing enabled")
@@ -277,6 +281,7 @@ Examples:
     parser_check.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser_check.add_argument("-l", "--limit", type=int, help="Max divergences to collect")
     parser_check.add_argument("--lookahead", type=int, help="Lookahead window size")
+    parser_check.add_argument("--tui", action="store_true", help="Launch interactive TUI viewer")
     parser_check.add_argument("binary_args", nargs="*", help="Arguments to pass to binary")
 
     args = parser.parse_args()

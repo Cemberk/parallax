@@ -11,6 +11,7 @@ mod parser;
 mod report;
 mod site_map;
 mod trace_format;
+mod tui;
 
 use differ::{diff_traces, DiffConfig};
 use parser::TraceFile;
@@ -61,6 +62,10 @@ struct Args {
     /// Dump first N events from trace B (debugging)
     #[arg(long)]
     dump_b: Option<usize>,
+
+    /// Launch interactive TUI viewer
+    #[arg(long)]
+    tui: bool,
 }
 
 fn main() -> Result<()> {
@@ -113,6 +118,12 @@ fn main() -> Result<()> {
 
     // Perform differential analysis
     let result = diff_traces(&trace_a, &trace_b, &config)?;
+
+    // TUI mode: launch interactive viewer
+    if args.tui {
+        tui::run_tui(trace_a, trace_b, result, site_map)?;
+        return Ok(());
+    }
 
     // Print results
     print_summary(&result);
