@@ -37,29 +37,58 @@ else()
 endif()
 
 # Find LLVM (for the pass)
-# Prefer LLVM 20 (closest to Triton's bundled LLVM 22), then 18 as fallback
+# User can skip auto-detection by setting PRLX_LLVM_DIR to the directory
+# containing LLVMConfig.cmake (e.g., -DPRLX_LLVM_DIR=/opt/llvm-20/lib/cmake/llvm)
+set(PRLX_LLVM_DIR "" CACHE PATH "Explicit path to LLVMConfig.cmake directory (skips auto-detection)")
 set(BUILD_LLVM_PASS OFF)
-foreach(_LLVM_VER 20 19 18)
+
+if(PRLX_LLVM_DIR)
+    find_package(LLVM REQUIRED CONFIG PATHS "${PRLX_LLVM_DIR}" NO_DEFAULT_PATH)
+    if(LLVM_VERSION_MAJOR LESS 18)
+        message(FATAL_ERROR "PRLX requires LLVM >= 18, found ${LLVM_PACKAGE_VERSION}")
+    endif()
+    message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} (user-specified)")
+    message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+    set(BUILD_LLVM_PASS ON)
+    set(PRLX_LLVM_VERSION ${LLVM_VERSION_MAJOR})
+else()
+    # Auto-detect: prefer LLVM 20 (closest to Triton's bundled LLVM 22), then 18 as fallback
+    foreach(_LLVM_VER 20 19 18)
+        if(NOT BUILD_LLVM_PASS)
+            # Don't pass version to find_package — LLVM's cmake version compatibility
+            # checks are too strict. We verify the major version ourselves.
+            unset(LLVM_FOUND CACHE)
+            unset(LLVM_DIR CACHE)
+            find_package(LLVM CONFIG
+                PATHS "/usr/lib/llvm-${_LLVM_VER}/cmake"
+                NO_DEFAULT_PATH
+            )
+            if(LLVM_FOUND AND LLVM_VERSION_MAJOR EQUAL ${_LLVM_VER})
+                message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+                message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+                set(BUILD_LLVM_PASS ON)
+                set(PRLX_LLVM_VERSION ${_LLVM_VER})
+            endif()
+        endif()
+    endforeach()
+
+    # Last resort: let CMake search its default paths (Spack, Conda, Homebrew, etc.)
     if(NOT BUILD_LLVM_PASS)
-        # Don't pass version to find_package — LLVM's cmake version compatibility
-        # checks are too strict. We verify the major version ourselves.
         unset(LLVM_FOUND CACHE)
         unset(LLVM_DIR CACHE)
-        find_package(LLVM CONFIG
-            PATHS "/usr/lib/llvm-${_LLVM_VER}/cmake"
-            NO_DEFAULT_PATH
-        )
-        if(LLVM_FOUND AND LLVM_VERSION_MAJOR EQUAL ${_LLVM_VER})
-            message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+        find_package(LLVM CONFIG QUIET)
+        if(LLVM_FOUND AND LLVM_VERSION_MAJOR GREATER_EQUAL 18)
+            message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} via default search")
             message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
             set(BUILD_LLVM_PASS ON)
-            set(PRLX_LLVM_VERSION ${_LLVM_VER})
+            set(PRLX_LLVM_VERSION ${LLVM_VERSION_MAJOR})
         endif()
     endif()
-endforeach()
+endif()
 
 if(NOT BUILD_LLVM_PASS)
-    message(WARNING "LLVM 18, 19, or 20 not found. LLVM pass will not be built.")
+    message(WARNING "LLVM 18+ not found. LLVM pass will not be built.")
+    message(WARNING "Set -DPRLX_LLVM_DIR=<path> to specify a custom LLVM installation.")
     message(WARNING "Runtime and tests will still be built.")
 endif()
 

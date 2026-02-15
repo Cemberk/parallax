@@ -90,17 +90,20 @@ endif()
 
 # NVPTX bitcode for Triton integration (device-only runtime)
 # Compiled with the highest available clang to match Triton's LLVM IR format.
-# Prefer clang-20 (closer to Triton's bundled LLVM 22), fall back to clang-18.
-set(PRLX_CLANG "")
-foreach(_CLANG_VER clang++-20 clang++-18)
-    if(NOT PRLX_CLANG)
-        find_program(_FOUND_CLANG ${_CLANG_VER})
-        if(_FOUND_CLANG)
-            set(PRLX_CLANG ${_FOUND_CLANG})
+# User can skip auto-detection: -DPRLX_CLANG=/opt/llvm-20/bin/clang++
+set(PRLX_CLANG "" CACHE FILEPATH "Clang compiler for NVPTX bitcode (skips auto-detection)")
+if(NOT PRLX_CLANG)
+    # Auto-detect: prefer clang-20 (closer to Triton's bundled LLVM 22), fall back to clang-18.
+    foreach(_CLANG_VER clang++-20 clang++-18)
+        if(NOT PRLX_CLANG)
+            find_program(_FOUND_CLANG ${_CLANG_VER})
+            if(_FOUND_CLANG)
+                set(PRLX_CLANG ${_FOUND_CLANG} CACHE FILEPATH "Clang compiler for NVPTX bitcode (auto-detected)" FORCE)
+            endif()
+            unset(_FOUND_CLANG CACHE)
         endif()
-        unset(_FOUND_CLANG CACHE)
-    endif()
-endforeach()
+    endforeach()
+endif()
 
 if(PRLX_CLANG)
     set(PRLX_RUNTIME_BC "${CMAKE_CURRENT_BINARY_DIR}/prlx_runtime_nvptx.bc")
