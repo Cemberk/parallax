@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import logging
 import os
 import re
 import subprocess
@@ -11,11 +12,14 @@ from pathlib import Path
 
 from . import _find_lib
 
+logger = logging.getLogger(__name__)
+
 try:
     from importlib.metadata import version as _meta_version
     PRLX_VERSION = _meta_version("prlx")
-except Exception:
+except Exception as e:
     PRLX_VERSION = "dev"
+    logger.debug("Could not read prlx version from metadata: %s", e)
 
 PRLX_BANNER = r"""
  ____  ____  _     __  __
@@ -43,9 +47,9 @@ def _detect_gpu():
             sm = parts[1].replace(".", "")
             return f"Auto-detected: NVIDIA {name} (SM_{sm})"
     except FileNotFoundError:
-        pass  # nvidia-smi not installed
-    except subprocess.SubprocessError:
-        pass  # nvidia-smi failed (no driver, no GPU)
+        logger.debug("nvidia-smi not found in PATH")
+    except subprocess.SubprocessError as e:
+        logger.debug("nvidia-smi failed: %s", e)
     return "No GPU detected"
 
 
@@ -98,9 +102,9 @@ def detect_gpu_arch():
                     major, minor = int(parts[0]), int(parts[1])
                     return major * 10 + minor
     except FileNotFoundError:
-        pass  # nvidia-smi not installed
-    except subprocess.SubprocessError:
-        pass  # nvidia-smi failed
+        logger.debug("nvidia-smi not found (detect_gpu_arch)")
+    except subprocess.SubprocessError as e:
+        logger.debug("nvidia-smi failed (detect_gpu_arch): %s", e)
     return None
 
 
@@ -125,9 +129,9 @@ def find_clang_for_pass(pass_lib):
                     if clang_path.returncode == 0:
                         return clang_path.stdout.strip(), llvm_ver
     except FileNotFoundError:
-        pass  # readelf not installed
-    except subprocess.SubprocessError:
-        pass  # readelf failed
+        logger.debug("readelf not found in PATH")
+    except subprocess.SubprocessError as e:
+        logger.debug("readelf failed: %s", e)
 
     # For bundled versioned pass (libPrlxPass.llvm20.so), extract from filename
     m = re.search(r"llvm(\d+)", pass_lib.name)
@@ -162,9 +166,9 @@ def find_best_ptxas_arch(gpu_cc):
             if max_arch > 0:
                 return max_arch
     except FileNotFoundError:
-        pass  # nvcc not installed
-    except subprocess.SubprocessError:
-        pass  # nvcc failed
+        logger.debug("nvcc not found in PATH")
+    except subprocess.SubprocessError as e:
+        logger.debug("nvcc --list-gpu-arch failed: %s", e)
     return gpu_cc
 
 
@@ -214,8 +218,8 @@ def cmd_diff(args):
                         "it may be stale. Recompile or pass --map explicitly.",
                         file=sys.stderr,
                     )
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("Could not check site map staleness: %s", e)
         else:
             print("Note: No site map found. Divergences will show site IDs only.")
             print("      To see source locations, provide --map prlx-sites.json")

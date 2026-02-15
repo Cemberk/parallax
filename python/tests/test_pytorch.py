@@ -256,18 +256,19 @@ class TestUninstallRestoresState:
 
 
 class TestPrlxTorchWrapper:
-    def test_wrapper_sets_env_variables(self):
+    def test_wrapper_sets_env_variables(self, tmp_path):
         """PrlxTorchWrapper should set PRLX_SESSION on enter and clean up on exit."""
         from prlx.pytorch_hook import PrlxTorchWrapper
 
         orig_session = os.environ.get("PRLX_SESSION")
+        trace_output = str(tmp_path / "test_trace")
 
         try:
             with mock.patch("prlx.pytorch_hook.find_runtime_library", return_value=None):
-                wrapper = PrlxTorchWrapper("my_test_session", output="/tmp/test_trace")
+                wrapper = PrlxTorchWrapper("my_test_session", output=trace_output)
                 with wrapper:
                     assert os.environ.get("PRLX_SESSION") == "my_test_session"
-                    assert os.environ.get("PRLX_TRACE") == "/tmp/test_trace"
+                    assert os.environ.get("PRLX_TRACE") == trace_output
 
                 # After exit, env vars should be cleaned up
                 assert os.environ.get("PRLX_SESSION") != "my_test_session" or "PRLX_SESSION" not in os.environ

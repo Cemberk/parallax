@@ -147,7 +147,13 @@ bool TraceWriter::write(const std::string& path, bool compress) {
         hdr->flags |= PRLX_FLAG_COMPRESS;
 
         // Write header uncompressed
-        fwrite(buffer.data(), 1, sizeof(TraceFileHeader), f);
+        size_t hdr_written = fwrite(buffer.data(), 1, sizeof(TraceFileHeader), f);
+        if (hdr_written != sizeof(TraceFileHeader)) {
+            fprintf(stderr, "[prlx-nvbit] ERROR: incomplete header write (%zu of %zu bytes)\n",
+                    hdr_written, sizeof(TraceFileHeader));
+            fclose(f);
+            return false;
+        }
 
         // Compress payload (everything after header)
         const uint8_t* payload = buffer.data() + sizeof(TraceFileHeader);
@@ -159,7 +165,11 @@ bool TraceWriter::write(const std::string& path, bool compress) {
             payload, payload_size, 1);
 
         if (!ZSTD_isError(compressed_size)) {
-            fwrite(compressed.data(), 1, compressed_size, f);
+            size_t comp_written = fwrite(compressed.data(), 1, compressed_size, f);
+            if (comp_written != compressed_size) {
+                fprintf(stderr, "[prlx-nvbit] ERROR: incomplete compressed write (%zu of %zu bytes)\n",
+                        comp_written, compressed_size);
+            }
             fprintf(stderr, "[prlx-nvbit] Wrote trace: %s (%zu bytes compressed from %zu, %u warps, %zu events)\n",
                     path.c_str(), sizeof(TraceFileHeader) + compressed_size,
                     buffer.size(), total_warp_slots, total_events_);
@@ -167,7 +177,11 @@ bool TraceWriter::write(const std::string& path, bool compress) {
             // Compression failed, fall back to uncompressed
             hdr->flags &= ~PRLX_FLAG_COMPRESS;
             fseek(f, 0, SEEK_SET);
-            fwrite(buffer.data(), 1, buffer.size(), f);
+            size_t fallback_written = fwrite(buffer.data(), 1, buffer.size(), f);
+            if (fallback_written != buffer.size()) {
+                fprintf(stderr, "[prlx-nvbit] ERROR: incomplete fallback write (%zu of %zu bytes)\n",
+                        fallback_written, buffer.size());
+            }
             fprintf(stderr, "[prlx-nvbit] Wrote trace: %s (%zu bytes, %u warps, %zu events) [zstd failed]\n",
                     path.c_str(), buffer.size(), total_warp_slots, total_events_);
         }
@@ -175,7 +189,13 @@ bool TraceWriter::write(const std::string& path, bool compress) {
 #endif
     {
         (void)compress;
-        fwrite(buffer.data(), 1, buffer.size(), f);
+        size_t written = fwrite(buffer.data(), 1, buffer.size(), f);
+        if (written != buffer.size()) {
+            fprintf(stderr, "[prlx-nvbit] ERROR: incomplete trace write (%zu of %zu bytes)\n",
+                    written, buffer.size());
+            fclose(f);
+            return false;
+        }
         fprintf(stderr, "[prlx-nvbit] Wrote trace: %s (%zu bytes, %u warps, %zu events)\n",
                 path.c_str(), buffer.size(), total_warp_slots, total_events_);
     }

@@ -209,13 +209,17 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
 
             // Initialize each ring header with the depth
             void* h_ring_init = malloc(ring_size);
-            memset(h_ring_init, 0, ring_size);
-            ((HistoryRingHeader*)h_ring_init)->depth = history_depth;
-            for (uint32_t w = 0; w < total_warps; w++) {
-                hipMemcpy((char*)d_history_buffer + w * ring_size, h_ring_init,
-                           sizeof(HistoryRingHeader), hipMemcpyHostToDevice);
+            if (!h_ring_init) {
+                fprintf(stderr, "[prlx] ERROR: malloc for history ring init failed\n");
+            } else {
+                memset(h_ring_init, 0, ring_size);
+                ((HistoryRingHeader*)h_ring_init)->depth = history_depth;
+                for (uint32_t w = 0; w < total_warps; w++) {
+                    hipMemcpy((char*)d_history_buffer + w * ring_size, h_ring_init,
+                               sizeof(HistoryRingHeader), hipMemcpyHostToDevice);
+                }
+                free(h_ring_init);
             }
-            free(h_ring_init);
 
             hipMemcpyToSymbol(HIP_SYMBOL(g_prlx_history_buffer), &d_history_buffer, sizeof(void*));
             hipMemcpyToSymbol(HIP_SYMBOL(g_prlx_history_depth), &history_depth, sizeof(uint32_t));
@@ -242,13 +246,17 @@ extern "C" void prlx_pre_launch(const char* kernel_name, dim3 gridDim, dim3 bloc
             hipMemset(d_snapshot_buffer, 0, snapshot_buffer_size);
 
             void* h_snap_init = malloc(snap_ring_size);
-            memset(h_snap_init, 0, snap_ring_size);
-            ((SnapshotRingHeader*)h_snap_init)->depth = snapshot_depth;
-            for (uint32_t w = 0; w < total_warps; w++) {
-                hipMemcpy((char*)d_snapshot_buffer + w * snap_ring_size, h_snap_init,
-                           sizeof(SnapshotRingHeader), hipMemcpyHostToDevice);
+            if (!h_snap_init) {
+                fprintf(stderr, "[prlx] ERROR: malloc for snapshot ring init failed\n");
+            } else {
+                memset(h_snap_init, 0, snap_ring_size);
+                ((SnapshotRingHeader*)h_snap_init)->depth = snapshot_depth;
+                for (uint32_t w = 0; w < total_warps; w++) {
+                    hipMemcpy((char*)d_snapshot_buffer + w * snap_ring_size, h_snap_init,
+                               sizeof(SnapshotRingHeader), hipMemcpyHostToDevice);
+                }
+                free(h_snap_init);
             }
-            free(h_snap_init);
 
             hipMemcpyToSymbol(HIP_SYMBOL(g_prlx_snapshot_buffer), &d_snapshot_buffer, sizeof(void*));
             hipMemcpyToSymbol(HIP_SYMBOL(g_prlx_snapshot_depth), &snapshot_depth, sizeof(uint32_t));
@@ -398,8 +406,12 @@ extern "C" void prlx_post_launch(void) {
     if (compress_enabled && payload_size > 0) {
         header->flags |= PRLX_FLAG_COMPRESS;
 
-        fwrite(header, 1, sizeof(TraceFileHeader), f);
-        total_written += sizeof(TraceFileHeader);
+        size_t hdr_w = fwrite(header, 1, sizeof(TraceFileHeader), f);
+        if (hdr_w != sizeof(TraceFileHeader)) {
+            fprintf(stderr, "[prlx] ERROR: incomplete header write (%zu of %zu bytes)\n",
+                    hdr_w, sizeof(TraceFileHeader));
+        }
+        total_written += hdr_w;
 
         void* payload = malloc(payload_size);
         if (payload) {
@@ -420,8 +432,12 @@ extern "C" void prlx_post_launch(void) {
             if (comp_buf) {
                 size_t comp_size = ZSTD_compress(comp_buf, comp_bound, payload, payload_size, 3);
                 if (!ZSTD_isError(comp_size)) {
-                    fwrite(comp_buf, 1, comp_size, f);
-                    total_written += comp_size;
+                    size_t comp_w = fwrite(comp_buf, 1, comp_size, f);
+                    if (comp_w != comp_size) {
+                        fprintf(stderr, "[prlx] ERROR: incomplete compressed write (%zu of %zu bytes)\n",
+                                comp_w, comp_size);
+                    }
+                    total_written += comp_w;
                     fprintf(stderr, "[prlx] Compressed: %zu -> %zu bytes (%.1fx)\n",
                             payload_size, comp_size, (double)payload_size / comp_size);
                 } else {
@@ -429,9 +445,12 @@ extern "C" void prlx_post_launch(void) {
                             ZSTD_getErrorName(comp_size));
                     header->flags &= ~PRLX_FLAG_COMPRESS;
                     fseek(f, 0, SEEK_SET);
-                    fwrite(header, 1, sizeof(TraceFileHeader), f);
-                    fwrite(payload, 1, payload_size, f);
-                    total_written = sizeof(TraceFileHeader) + payload_size;
+                    size_t hdr_fb = fwrite(header, 1, sizeof(TraceFileHeader), f);
+                    size_t pay_fb = fwrite(payload, 1, payload_size, f);
+                    if (hdr_fb != sizeof(TraceFileHeader) || pay_fb != payload_size) {
+                        fprintf(stderr, "[prlx] ERROR: incomplete fallback write\n");
+                    }
+                    total_written = hdr_fb + pay_fb;
                 }
                 free(comp_buf);
             }

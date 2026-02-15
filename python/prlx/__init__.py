@@ -1,10 +1,15 @@
 """PRLX - Differential debugger for CUDA/Triton GPU kernels."""
 
+import logging as _logging
+
+_logger = _logging.getLogger(__name__)
+
 try:
     from importlib.metadata import version as _meta_version
     __version__ = _meta_version("prlx")
-except Exception:
+except Exception as _e:
     __version__ = "0.0.0.dev0"
+    _logger.debug("Could not read prlx version from metadata: %s", _e)
 
 from .trace_reader import read_trace, TraceData
 from .training_monitor import PrlxTrainingMonitor

@@ -11,11 +11,14 @@ Three-tier instrumentation strategy:
 Requires PyTorch >= 2.0.
 """
 
+import logging
 import os
 import sys
 import functools
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from ._find_lib import (
     find_pass_plugin,
@@ -365,8 +368,8 @@ def uninstall():
         try:
             from .triton_hook import uninstall as triton_uninstall
             triton_uninstall()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to uninstall Triton hook: %s", e)
         _tier1_active = False
 
     # Tier 2: restore original load_inline

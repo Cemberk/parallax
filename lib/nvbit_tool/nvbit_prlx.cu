@@ -11,7 +11,6 @@
 //   - flush_channel kernel for proper channel drain
 //   - All launch API variants including CUDA graphs
 
-#include <assert.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -150,12 +149,23 @@ static void* recv_thread_fun(void* args) {
     CUcontext ctx = (CUcontext)args;
 
     pthread_mutex_lock(&g_mutex);
-    assert(g_ctx_state_map.find(ctx) != g_ctx_state_map.end());
-    CTXstate* ctx_state = g_ctx_state_map[ctx];
+    auto it = g_ctx_state_map.find(ctx);
+    if (it == g_ctx_state_map.end()) {
+        fprintf(stderr, "[prlx-nvbit] ERROR: recv_thread_fun: context not found in state map\n");
+        pthread_mutex_unlock(&g_mutex);
+        return nullptr;
+    }
+    CTXstate* ctx_state = it->second;
     ChannelHost* ch_host = &ctx_state->channel_host;
     pthread_mutex_unlock(&g_mutex);
 
     char* recv_buffer = (char*)malloc(CHANNEL_SIZE);
+    if (!recv_buffer) {
+        fprintf(stderr, "[prlx-nvbit] ERROR: recv_thread_fun: malloc(%ld) failed\n",
+                (long)CHANNEL_SIZE);
+        ctx_state->recv_thread_done = RecvThreadState::FINISHED;
+        return nullptr;
+    }
 
     while (ctx_state->recv_thread_done == RecvThreadState::WORKING) {
         uint32_t num_recv_bytes = ch_host->recv(recv_buffer, CHANNEL_SIZE);
@@ -288,8 +298,12 @@ static void instrument_single_function(CUcontext ctx, CUfunction func,
 
 // Instrument a kernel and all its related device functions.
 static void instrument_function_if_needed(CUcontext ctx, CUfunction func) {
-    assert(g_ctx_state_map.find(ctx) != g_ctx_state_map.end());
-    CTXstate* ctx_state = g_ctx_state_map[ctx];
+    auto it = g_ctx_state_map.find(ctx);
+    if (it == g_ctx_state_map.end()) {
+        fprintf(stderr, "[prlx-nvbit] ERROR: instrument_function_if_needed: context not found\n");
+        return;
+    }
+    CTXstate* ctx_state = it->second;
 
     // Get related device functions that the kernel may call
     std::vector<CUfunction> related_functions =
@@ -358,8 +372,12 @@ static void enter_kernel_launch(CUcontext ctx, CUfunction func,
                                  uint32_t gridDimX, uint32_t gridDimY, uint32_t gridDimZ,
                                  uint32_t blockDimX, uint32_t blockDimY, uint32_t blockDimZ,
                                  bool stream_capture, bool build_graph) {
-    assert(g_ctx_state_map.find(ctx) != g_ctx_state_map.end());
-    CTXstate* ctx_state = g_ctx_state_map[ctx];
+    auto it = g_ctx_state_map.find(ctx);
+    if (it == g_ctx_state_map.end()) {
+        fprintf(stderr, "[prlx-nvbit] ERROR: enter_kernel_launch: context not found\n");
+        return;
+    }
+    CTXstate* ctx_state = it->second;
 
     // Instrument the function and all its device function callees
     instrument_function_if_needed(ctx, func);
@@ -477,7 +495,11 @@ void nvbit_at_ctx_init(CUcontext ctx) {
     // NOTE: No CUDA memory allocation here — NVBit docs say it will deadlock.
     // Channel allocation happens in nvbit_tool_init() below.
 
-    assert(g_ctx_state_map.find(ctx) == g_ctx_state_map.end());
+    if (g_ctx_state_map.find(ctx) != g_ctx_state_map.end()) {
+        fprintf(stderr, "[prlx-nvbit] WARNING: nvbit_at_ctx_init: context already registered, skipping\n");
+        pthread_mutex_unlock(&g_mutex);
+        return;
+    }
     CTXstate* ctx_state = new CTXstate;
     ctx_state->id = (int)g_ctx_state_map.size();
     g_ctx_state_map[ctx] = ctx_state;
@@ -496,7 +518,11 @@ void nvbit_tool_init(CUcontext ctx) {
         pthread_mutex_unlock(&g_mutex);
         return;
     }
-    assert(g_ctx_state_map.find(ctx) != g_ctx_state_map.end());
+    if (g_ctx_state_map.find(ctx) == g_ctx_state_map.end()) {
+        fprintf(stderr, "[prlx-nvbit] ERROR: nvbit_tool_init: context not registered\n");
+        pthread_mutex_unlock(&g_mutex);
+        return;
+    }
     init_context_state(ctx);
     pthread_mutex_unlock(&g_mutex);
 }
@@ -510,8 +536,14 @@ void nvbit_at_ctx_term(CUcontext ctx) {
 
     g_skip_callback_flag = true;
 
-    assert(g_ctx_state_map.find(ctx) != g_ctx_state_map.end());
-    CTXstate* ctx_state = g_ctx_state_map[ctx];
+    auto term_it = g_ctx_state_map.find(ctx);
+    if (term_it == g_ctx_state_map.end()) {
+        fprintf(stderr, "[prlx-nvbit] ERROR: nvbit_at_ctx_term: context not found\n");
+        g_skip_callback_flag = false;
+        pthread_mutex_unlock(&g_mutex);
+        return;
+    }
+    CTXstate* ctx_state = term_it->second;
 
     // Flush channel if any kernels were launched in this context
     if (ctx_state->need_sync) {
@@ -519,7 +551,11 @@ void nvbit_at_ctx_term(CUcontext ctx) {
         nvbit_launch_kernel(ctx, ctx_state->flush_channel_func,
                             1, 1, 1, 1, 1, 1, 0, nullptr, args, nullptr);
         cudaDeviceSynchronize();
-        assert(cudaGetLastError() == cudaSuccess);
+        cudaError_t flush_err = cudaGetLastError();
+        if (flush_err != cudaSuccess) {
+            fprintf(stderr, "[prlx-nvbit] WARNING: flush_channel CUDA error: %s\n",
+                    cudaGetErrorString(flush_err));
+        }
     }
 
     // Signal receiver thread to stop and wait for drain
