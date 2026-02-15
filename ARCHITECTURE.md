@@ -22,7 +22,7 @@ execution traces at runtime, and then diffing two traces offline.
   libPrlxPass.so                stages["llir"]
       |                               |
       +--------> LLVM IR <------------+
-                 (NVPTX)
+                 (NVPTX / AMDGPU)
                     |
                     v
              PrlxPass walks IR:
@@ -84,8 +84,11 @@ execution traces at runtime, and then diffing two traces offline.
         |       ExtraEvents (resync found, N events skipped)
         |     attach snapshot context if available
         |
-        +-- output: summary + per-site divergence report
-            or interactive TUI (ratatui)
+        +-- output modes:
+            - summary + per-site divergence report
+            - interactive TUI (ratatui) with source view
+            - JSON (for CI: prlx assert)
+            - Chrome Trace Format (for flamegraph visualization)
 ```
 
 ## Components
@@ -93,7 +96,13 @@ execution traces at runtime, and then diffing two traces offline.
 ### 1. LLVM Pass (`lib/pass/`)
 
 A MODULE-level LLVM plugin loaded via `-fpass-plugin`. It operates on
-NVPTX IR (the intermediate representation for GPU device code).
+NVPTX or AMDGPU IR (the intermediate representation for GPU device code).
+
+**Target detection:**
+- Uses `GPUTarget` enum (`None`, `NVPTX`, `AMDGPU`) to identify the module target
+- NVPTX: detected by `"nvptx"` in target triple
+- AMDGPU: detected by `"amdgcn"` in target triple
+- Non-GPU modules are skipped entirely
 
 **What it instruments:**
 - `BranchInst` (conditional) -> `__prlx_record_branch`
@@ -103,8 +112,13 @@ NVPTX IR (the intermediate representation for GPU device code).
 
 **What it skips:**
 - Functions named `__prlx_*` (prevents infinite recursion)
-- CUDA builtins (`atomicAdd`, `__activemask`, `__shfl_sync`, etc.)
+- NVIDIA builtins (`atomicAdd`, `__activemask`, `__shfl_sync`, etc.)
+- AMD builtins (`__builtin_amdgcn_*`, `__ockl_*`, `__hip_atomic*`)
 - Functions not matching `PRLX_FILTER` patterns (if set)
+
+**Address space handling:**
+- Shared memory: addrspace 3 on both NVPTX and AMDGPU
+- Global memory: NVPTX uses AS 0 and 1; AMDGPU uses AS 1 only (AS 0 is flat/generic)
 
 **Key design decisions:**
 - Uses `getOrDeclare()` to avoid LLVM auto-renaming duplicate declarations
@@ -118,8 +132,9 @@ to source locations.
 ### 2. Runtime (`lib/runtime/`)
 
 Two halves: device-side recording functions and host-side lifecycle hooks.
+Separate implementations for CUDA and HIP (AMD ROCm).
 
-**Device side** (`prlx_runtime.cu`):
+**Device side — CUDA** (`prlx_runtime.cu`):
 - Recording functions called by instrumented code
 - Each function: computes warp index, atomically claims a slot in the
   per-warp ring buffer, writes a 16-byte `TraceEvent`
@@ -129,12 +144,28 @@ Two halves: device-side recording functions and host-side lifecycle hooks.
   collect both comparison operands from all 32 lanes without branches
 - History recording: writes to a separate ring buffer for time-travel context
 
-**Host side** (`prlx_host.cu`):
+**Device side — HIP** (`prlx_runtime_hip.cpp`):
+- Same recording functions with AMD intrinsic replacements:
+  - `__activemask()` -> `__ballot(1)`
+  - `__shfl_sync(mask, val, src)` -> `__shfl(val, src)`
+  - Lane ID: `__builtin_amdgcn_mbcnt_lo(~0u, 0)` (instead of PTX inline asm)
+  - Cache-bypass stores: volatile stores (instead of PTX `st.global.cg`)
+- Targets wave32 (RDNA GPUs). Wave64 (CDNA) deferred.
+
+**Host side — CUDA** (`prlx_host.cu`):
 - `prlx_pre_launch()`: allocates GPU memory for all buffers, writes header,
   sets device globals via `cudaMemcpyToSymbol`
 - `prlx_post_launch()`: syncs device, copies buffers to host, writes `.prlx`
   file, frees GPU memory
 - Session API: captures multiple kernel launches into a directory with manifest
+
+**Host side — HIP** (`prlx_host_hip.cpp`):
+- Mirrors CUDA host side with `hip*` API calls (`hipMalloc`, `hipMemcpy`,
+  `hipMemcpyToSymbol(HIP_SYMBOL(...))`, `hipFree`, etc.)
+
+**Platform detection** (`prlx_runtime.h`):
+- `#if defined(__HIP_PLATFORM_AMD__)` selects HIP headers; otherwise CUDA headers
+- Common `__device__` declarations guarded by `#if defined(__CUDACC__) || defined(__HIP__)`
 
 ### 3. Differ (`differ/`, Rust)
 
@@ -160,31 +191,84 @@ Compares two `.prlx` trace files and identifies divergences.
 - Summary: "N divergences across M warps at K sites"
 - Detailed: per-site, per-warp, per-event divergence report with optional
   per-lane snapshot rendering
-- TUI: interactive terminal UI (ratatui + crossterm)
+- TUI: interactive terminal UI (ratatui + crossterm) with source view
+- JSON (`--json`): structured output for CI integration (`json_output.rs`)
+- Flamegraph (`--export-flamegraph`): Chrome Trace Format (`flamegraph.rs`)
+
+**JSON output** (`json_output.rs`):
+- `JsonDiffReport` with status, divergence counts, threshold, passed bool
+- `ignore_active_mask` filtering: count only branch/path/value divergences
+- Used by `prlx assert` for CI regression gating
+
+**Flamegraph export** (`flamegraph.rs`):
+- Chrome Trace Format (catapult JSON) for `chrome://tracing` or Perfetto
+- pid = CUDA/HIP block index, tid = warp within block
+- Duration events (`ph: "X"`) per divergence, counter events (`ph: "C"`)
+  for per-site frequency heatmap
+
+**TUI source view** (`tui/source_cache.rs`):
+- Press `s` to toggle inline source code at the selected divergence site
+- `SourceCache` lazily loads files, caches as `None` for unreadable files
+- Target line highlighted in yellow with `>` marker
+- Requires `--map` for site-to-source mapping
 
 ### 4. Python Package (`python/prlx/`)
 
-User-facing interface and Triton integration.
+User-facing interface, Triton integration, and PyTorch integration.
 
 - `prlx.enable()` -> installs Triton compiler hook
+- `prlx.enable_pytorch()` -> installs PyTorch hooks (three tiers)
+- `prlx.pytorch_trace(name)` -> context manager for session tracing
 - `prlx.read_trace(path)` -> pure-Python trace parser (struct + mmap)
 - `prlx.diff_traces(a, b)` -> shells out to `prlx-diff`
 - `prlx compile` CLI -> wraps clang with the pass plugin
 - `prlx diff` CLI -> wraps `prlx-diff` with auto site-map discovery
-- `prlx session capture` CLI -> runs binary with `PRLX_SESSION` env var
-- `prlx session inspect` CLI -> reads and prints a session manifest
-- `prlx session diff` CLI -> diffs two session directories
+- `prlx assert` CLI -> CI regression gate with threshold-based pass/fail
+- `prlx flamegraph` CLI -> Chrome Trace Format export
+- `prlx pytorch` CLI -> run scripts with PyTorch instrumentation
+- `prlx session capture/inspect/diff` CLI -> multi-kernel session management
 
 **Triton hook** (`triton_hook.py`):
 - Intercepts `stages["llir"]` via `knobs.runtime.add_stages_inspection_hook`
 - Pipeline: llvm-link (merge runtime BC) -> opt (run pass) -> return IR string
 - Handles Triton's extended NVPTX data layout with `--suppress-warnings`
 
+**PyTorch hook** (`pytorch_hook.py`):
+Three-tier instrumentation for PyTorch workloads:
+
+- **Tier 1 — Triton via torch.compile**: Delegates to `triton_hook.install()`.
+  Instruments kernels compiled through `torch.compile` / Inductor.
+- **Tier 2 — load_inline hook**: Monkey-patches
+  `torch.utils.cpp_extension.load_inline` to inject `-fpass-plugin=libPrlxPass.so`
+  into `extra_cuda_cflags` and link the runtime library via `extra_ldflags`.
+  Only works when extension code is clang-compatible.
+- **Tier 3 — NVBit fallback**: Sets `LD_PRELOAD=libprlx_nvbit.so` for
+  SASS-level binary instrumentation of pre-compiled CUDA ops. Must be
+  configured before CUDA context creation.
+
+`PrlxTorchWrapper` is a context manager that sets `PRLX_SESSION` and
+`PRLX_TRACE` environment variables for scoped session tracing.
+
+`uninstall()` cleanly reverses all three tiers.
+
 ### 5. NVBit Tool (`lib/nvbit_tool/`) _(experimental)_
 
 SASS-level binary instrumentation for closed-source kernels.
 Uses NVBit to inject instrumentation at the GPU assembly level.
 Less tested than the LLVM pass path.
+
+### 6. Build System (`CMakeLists.txt`)
+
+Conditional multi-platform build:
+
+- `PRLX_ENABLE_CUDA` (default ON): Builds CUDA runtime (`prlx_runtime`,
+  `prlx_runtime_shared`), NVPTX bitcode, and examples
+- `PRLX_ENABLE_HIP` (default OFF): Builds HIP runtime (`prlx_runtime_hip`)
+  with `find_package(hip)` and ROCm SDK detection
+- The LLVM pass (`libPrlxPass.so`) is always built — it handles both NVPTX
+  and AMDGPU targets at runtime via `getGPUTarget()`
+- The differ (`prlx-diff`) is target-agnostic — trace format is the same
+  regardless of GPU vendor
 
 ## Trace File Format (`.prlx`)
 
@@ -316,4 +400,6 @@ When a warp generates more than `events_per_warp` events:
 | Very large kernel (>10K warps)    | Sample: `PRLX_SAMPLE_RATE=8` or higher        |
 | Production binary (no recompile)  | NVBit backend (experimental)                  |
 | Triton kernel                     | `prlx.enable()`, same env vars apply          |
+| PyTorch model                     | `prlx.enable_pytorch()` (Triton + load_inline + NVBit) |
+| AMD GPU (RDNA, wave32)            | Build with `-DPRLX_ENABLE_HIP=ON`             |
 

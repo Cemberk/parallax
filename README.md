@@ -30,7 +30,7 @@ pip install prlx
 Needs CUDA 12+ and LLVM 18/19/20 on the host (for `prlx compile` and Triton integration). The differ and Python trace reader have no external deps.
 
 <details>
-<summary>From source</summary>
+<summary>From source (NVIDIA)</summary>
 
 ```bash
 cmake -B build && cmake --build build
@@ -39,6 +39,20 @@ pip install -e .
 ```
 
 Build deps: CMake 3.20+, LLVM/Clang 18–20, CUDA Toolkit, Rust stable.
+</details>
+
+<details>
+<summary>From source (AMD ROCm)</summary>
+
+```bash
+cmake -B build -DPRLX_ENABLE_CUDA=OFF -DPRLX_ENABLE_HIP=ON
+cmake --build build
+cd differ && cargo build --release && cd ..
+pip install -e .
+```
+
+Build deps: CMake 3.20+, LLVM/Clang 18–20, ROCm 5.0+, Rust stable.
+The LLVM pass supports AMDGPU targets. The HIP runtime targets wave32 (RDNA) GPUs.
 </details>
 
 ## Usage
@@ -116,13 +130,90 @@ prlx session capture ./my_pipeline -o /tmp/session_a -- --param-a
 
 Unmatched kernel launches between sessions are reported as warnings. Grid/block dimension mismatches are also flagged.
 
+### PyTorch
+
+```python
+import prlx
+
+# Hooks Triton (torch.compile) + load_inline (C++ extensions) automatically
+prlx.enable_pytorch()
+
+model = MyModel().cuda()
+output = model(input_tensor)  # kernels are instrumented
+
+# Or use the context manager for session tracing:
+with prlx.pytorch_trace("my_model", output="/tmp/trace"):
+    model(input_tensor)
+```
+
+```bash
+# Run a script with PyTorch instrumentation
+prlx pytorch script.py
+
+# NVBit fallback for pre-compiled ops (no recompilation needed)
+prlx pytorch --nvbit script.py
+
+# Check integration status
+prlx pytorch --info
+```
+
+Install the optional PyTorch dependency: `pip install prlx[pytorch]`
+
 ### TUI
 
 ```bash
-prlx diff a.prlx b.prlx --tui
+prlx diff a.prlx b.prlx --tui --map prlx-sites.json
 ```
 
-Interactive terminal UI for navigating divergences across warps.
+Interactive terminal UI for navigating divergences across warps. Press `s` to toggle inline source view at divergence sites (requires `--map` for site-to-source mapping).
+
+| Key | Action |
+|-----|--------|
+| `j`/`k` | Scroll up/down |
+| `n`/`N` | Next/previous divergence |
+| `]`/`[` | Next/previous warp |
+| `s` | Toggle source view |
+| `Tab` | Switch pane focus |
+| `/` | Jump to warp by number |
+| `q` | Quit |
+
+### CI Regression Gate
+
+Automatically pass/fail based on divergence thresholds:
+
+```bash
+# Strict: zero divergences allowed (default)
+prlx assert a.prlx b.prlx
+
+# Tolerant: allow up to 5 divergences
+prlx assert a.prlx b.prlx --max-divergences 5
+
+# Golden mode: compare against a known-good trace
+prlx assert --golden golden.prlx test.prlx
+
+# JSON output for CI pipelines
+prlx assert a.prlx b.prlx --json
+
+# Ignore active mask differences (only count branch/path/value)
+prlx assert a.prlx b.prlx --ignore-active-mask
+```
+
+Exit code 0 = pass, 1 = fail. Human-readable summary by default:
+
+```
+PRLX ASSERT: PASS (4 divergences, threshold: 5)
+PRLX ASSERT: FAIL (4 divergences, threshold: 2)
+```
+
+### Flamegraph Export
+
+Export divergences to Chrome Trace Format for visual analysis:
+
+```bash
+prlx flamegraph a.prlx b.prlx -o divergences.json --map prlx-sites.json
+```
+
+Open `divergences.json` in `chrome://tracing` or [ui.perfetto.dev](https://ui.perfetto.dev). Each row is a warp (grouped by block), colored bars show divergence events, and counter tracks show per-site frequency heatmaps.
 
 ## Environment Variables
 
@@ -144,7 +235,7 @@ Interactive terminal UI for navigating divergences across warps.
 
 PRLX has three backends for instrumenting GPU code:
 
-1. **LLVM pass** (`lib/pass/`) — loaded as `-fpass-plugin` during compilation (clang) or injected between Triton's `make_llir` and `make_ptx` stages. Walks the NVPTX IR, inserts calls to `__prlx_record_branch` / `__prlx_record_value` at every branch and comparison. For Triton's branchless single-BB kernels, it detects predicated ops (`icmp` feeding inline PTX asm or `select`).
+1. **LLVM pass** (`lib/pass/`) — loaded as `-fpass-plugin` during compilation (clang) or injected between Triton's `make_llir` and `make_ptx` stages. Walks NVPTX or AMDGPU IR, inserts calls to `__prlx_record_branch` / `__prlx_record_value` at every branch and comparison. For Triton's branchless single-BB kernels, it detects predicated ops (`icmp` feeding inline PTX asm or `select`). Supports both NVIDIA (NVPTX) and AMD (AMDGPU) targets.
 
 2. **NVBit tool** (`lib/nvbit_tool/`) _(experimental)_ — SASS-level binary instrumentation via NVBit. Works on closed-source kernels where you don't have IR access. Less tested than the LLVM pass; use for cases where recompilation is not possible.
 
@@ -155,13 +246,14 @@ Traces are written to `.prlx` files (custom binary format, optionally zstd-compr
 ## Layout
 
 ```
-lib/pass/           LLVM instrumentation pass (libPrlxPass.so)
-lib/runtime/        device-side recording + host hooks
+lib/pass/           LLVM instrumentation pass (libPrlxPass.so) — NVPTX + AMDGPU
+lib/runtime/        device-side recording + host hooks (CUDA + HIP)
 lib/nvbit_tool/     NVBit binary instrumentation backend (experimental)
 lib/common/         shared trace format header
-differ/             Rust differ + TUI (prlx-diff)
-python/prlx/        trace reader, Triton hook, runtime FFI, CLI
+differ/             Rust differ + TUI + JSON/flamegraph export (prlx-diff)
+python/prlx/        trace reader, Triton hook, PyTorch hook, runtime FFI, CLI
 examples/           demo kernels (branch, loop, matmul, occupancy)
+tools/              utilities (gen_demo_traces.py — synthetic trace generator)
 ```
 
 ## License
