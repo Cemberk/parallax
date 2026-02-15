@@ -102,6 +102,10 @@ Interactive terminal UI for navigating divergences across warps.
 | `PRLX_SAMPLE_RATE` | `1` | Record 1 in N events |
 | `PRLX_COMPRESS` | `0` | zstd compress the trace |
 | `PRLX_ENABLED` | `1` | Kill switch |
+| `PRLX_FILTER` | _(none)_ | Comma-separated glob patterns for kernel names to instrument |
+| `PRLX_SESSION` | _(none)_ | Directory path for multi-launch session mode |
+| `PRLX_SITES` | `prlx-sites.json` | Output path for site map |
+| `PRLX_OPT_TIMEOUT` | `120` | Timeout (seconds) for llvm-link/opt in Triton hook |
 
 ## How It Works
 

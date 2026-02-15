@@ -266,8 +266,8 @@ Scaling by kernel size:
 | 1024 blocks, 1024 threads    | 32,768 | 2 GB        | 2.3 GB       |
 
 **Rule of thumb:** ~64 KB per warp for events alone. If your kernel has
-more warps than your GPU has MB of free VRAM, reduce `PRLX_BUFFER_SIZE`
-(events per warp) or use `PRLX_SAMPLE_RATE`.
+more warps than your GPU has MB of free VRAM, use `PRLX_SAMPLE_RATE`
+to reduce event density.
 
 ### Trace File Size (on disk)
 
@@ -294,7 +294,7 @@ When a warp generates more than `events_per_warp` events:
 - `overflow_count` is incremented atomically
 - The event is silently dropped (no crash, no corruption)
 - The differ reports overflow counts in the summary
-- Increase `PRLX_BUFFER_SIZE` or use `PRLX_SAMPLE_RATE` to mitigate
+- Use `PRLX_SAMPLE_RATE` to mitigate
 
 ### Practical Guidance
 
@@ -302,8 +302,8 @@ When a warp generates more than `events_per_warp` events:
 |-----------------------------------|-----------------------------------------------|
 | Small kernel (<100 warps)         | Defaults. Turn on snapshots: `PRLX_SNAPSHOT_DEPTH=32` |
 | Medium kernel (100-1K warps)      | Defaults work. ~64-640 MB VRAM.               |
-| Large kernel (1K-10K warps)       | Reduce buffer: `PRLX_BUFFER_SIZE=1024`        |
-| Very large kernel (>10K warps)    | Sample: `PRLX_SAMPLE_RATE=8`, reduce buffer   |
+| Large kernel (1K-10K warps)       | Sample: `PRLX_SAMPLE_RATE=4`                  |
+| Very large kernel (>10K warps)    | Sample: `PRLX_SAMPLE_RATE=8` or higher        |
 | Production binary (no recompile)  | NVBit backend (experimental)                  |
 | Triton kernel                     | `prlx.enable()`, same env vars apply          |
 
