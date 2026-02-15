@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
+mod classifier;
 mod differ;
 mod flamegraph;
 mod json_output;
@@ -97,6 +98,11 @@ struct Args {
     #[arg(long)]
     continue_after_path: bool,
 
+    /// Cross-GPU mode: compare traces from different GPU architectures (NVIDIA vs AMD).
+    /// Relaxes grid/block validation and uses popcount-based active mask comparison.
+    #[arg(long)]
+    cross_gpu: bool,
+
     /// Output results as machine-readable JSON (for CI integration)
     #[arg(long)]
     json: bool,
@@ -109,6 +115,10 @@ struct Args {
     /// Only count branch/path/value divergences, ignore active mask differences (CI assert mode)
     #[arg(long)]
     ignore_active_mask: bool,
+
+    /// Run automated root-cause classification on divergences
+    #[arg(long)]
+    classify: bool,
 
     /// Export divergences to Chrome Trace Format for flamegraph visualization
     #[arg(long, value_name = "PATH")]
@@ -123,7 +133,7 @@ fn main() -> Result<()> {
     }
 
     if !args.json {
-        println!("Loading traces...");
+        eprintln!("Loading traces...");
     }
     let trace_a = TraceFile::open(&args.trace_a)
         .with_context(|| format!("Failed to load trace A: {}", args.trace_a.display()))?;
@@ -142,7 +152,7 @@ fn main() -> Result<()> {
 
     if !args.json {
         if let Some(ref map) = site_map {
-            println!("Loaded {} site mappings\n", map.len());
+            eprintln!("Loaded {} site mappings\n", map.len());
         }
     }
 
@@ -169,7 +179,7 @@ fn main() -> Result<()> {
             .with_context(|| format!("Failed to load remap-b: {}", remap_b_path.display()))?;
         let r = SiteRemapper::build(&map_a, &map_b);
         if !args.json {
-            println!("Site remapper: {} site_ids remapped\n", r.num_remapped());
+            eprintln!("Site remapper: {} site_ids remapped\n", r.num_remapped());
         }
         Some(r)
     } else {
@@ -180,8 +190,9 @@ fn main() -> Result<()> {
         compare_values: args.values,
         max_divergences: args.max_divergences,
         lookahead_window: args.lookahead,
-        force: args.force,
+        force: args.force || args.cross_gpu,
         continue_after_path: args.continue_after_path,
+        cross_gpu: args.cross_gpu,
     };
 
     let result = diff_traces_with_remap(&trace_a, &trace_b, &config, remapper.as_ref())?;
@@ -224,6 +235,11 @@ fn main() -> Result<()> {
     print_summary(&result);
     print_divergences(&result, args.max_shown, site_map.as_ref(), args.float);
 
+    if args.classify {
+        let classification = classifier::classify(&result, site_map.as_ref());
+        report::print_classification(&classification, site_map.as_ref());
+    }
+
     if args.history || trace_a.has_history() || trace_b.has_history() {
         print_history_context(&result, &trace_a, &trace_b, args.max_shown, site_map.as_ref());
     }
@@ -238,7 +254,7 @@ fn main() -> Result<()> {
 /// Run session-mode diff: compare two session directories
 fn run_session_diff(args: &Args) -> Result<()> {
     if !args.json {
-        println!("Loading sessions...");
+        eprintln!("Loading sessions...");
     }
     let session_a = SessionManifest::load(&args.trace_a)
         .with_context(|| format!("Failed to load session A: {}", args.trace_a.display()))?;
@@ -246,7 +262,7 @@ fn run_session_diff(args: &Args) -> Result<()> {
         .with_context(|| format!("Failed to load session B: {}", args.trace_b.display()))?;
 
     if !args.json {
-        println!(
+        eprintln!(
             "Session A: {} launches, Session B: {} launches\n",
             session_a.launches.len(),
             session_b.launches.len()
@@ -257,8 +273,9 @@ fn run_session_diff(args: &Args) -> Result<()> {
         compare_values: args.values,
         max_divergences: args.max_divergences,
         lookahead_window: args.lookahead,
-        force: args.force,
+        force: args.force || args.cross_gpu,
         continue_after_path: args.continue_after_path,
+        cross_gpu: args.cross_gpu,
     };
 
     let session_result = diff_session(&session_a, &session_b, &config);

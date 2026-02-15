@@ -7,6 +7,7 @@ except Exception:
     __version__ = "0.0.0.dev0"
 
 from .trace_reader import read_trace, TraceData
+from .training_monitor import PrlxTrainingMonitor
 from ._find_lib import find_differ_binary
 
 

@@ -72,6 +72,24 @@ target_compile_options(prlx_nvbit_inject PRIVATE
     >
 )
 
+# Optional zstd compression support
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(ZSTD QUIET libzstd)
+endif()
+if(NOT ZSTD_FOUND)
+    find_library(ZSTD_LIBRARIES NAMES zstd)
+    find_path(ZSTD_INCLUDE_DIRS NAMES zstd.h)
+    if(ZSTD_LIBRARIES AND ZSTD_INCLUDE_DIRS)
+        set(ZSTD_FOUND TRUE)
+    endif()
+endif()
+if(ZSTD_FOUND)
+    message(STATUS "NVBit tool: zstd compression enabled")
+else()
+    message(STATUS "NVBit tool: zstd not found, compression disabled")
+endif()
+
 # Main NVBit tool shared library
 add_library(prlx_nvbit SHARED
     nvbit_prlx.cu
@@ -91,6 +109,11 @@ target_link_libraries(prlx_nvbit PRIVATE
     pthread
     dl
 )
+if(ZSTD_FOUND)
+    target_compile_definitions(prlx_nvbit PRIVATE PRLX_HAS_ZSTD)
+    target_include_directories(prlx_nvbit PRIVATE ${ZSTD_INCLUDE_DIRS})
+    target_link_libraries(prlx_nvbit PRIVATE ${ZSTD_LIBRARIES})
+endif()
 set_target_properties(prlx_nvbit PROPERTIES
     CUDA_ARCHITECTURES "${PRLX_CUDA_ARCHITECTURES}"
     CUDA_SEPARABLE_COMPILATION ON

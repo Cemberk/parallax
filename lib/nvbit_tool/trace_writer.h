@@ -27,6 +27,9 @@ public:
                          uint32_t block_x, uint32_t block_y, uint32_t block_z,
                          uint32_t cuda_arch);
 
+    // Set sampling rate (1 = record all, N = record ~1/N events)
+    void set_sample_rate(uint32_t rate) { sample_rate_ = rate; }
+
     // Write the trace file in .prlx binary format
     // Returns true on success
     bool write(const std::string& path, bool compress = false);
@@ -37,6 +40,8 @@ public:
     // Statistics
     size_t total_events() const { return total_events_; }
     size_t num_warps_seen() const { return warp_events_.size(); }
+    size_t total_overflow() const;
+    uint32_t sample_rate() const { return sample_rate_; }
 
 private:
     // Per-warp event accumulator
@@ -52,6 +57,7 @@ private:
     uint32_t cuda_arch_ = 0;
 
     uint32_t events_per_warp_;
+    uint32_t sample_rate_ = 1;
     size_t total_events_ = 0;
 
     // warp_id → accumulated events

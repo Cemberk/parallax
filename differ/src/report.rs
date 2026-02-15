@@ -2,7 +2,8 @@
 
 use colored::*;
 
-use crate::differ::{DiffResult, Divergence, DivergenceKind, SnapshotContext};
+use crate::classifier::ClassificationReport;
+use crate::differ::{CrossGpuInfo, DiffResult, Divergence, DivergenceKind, SnapshotContext};
 use crate::parser::TraceFile;
 use crate::site_map::SiteMap;
 use crate::trace_format::{PRLX_FLAG_SAMPLED, PRLX_FLAG_SNAPSHOT};
@@ -10,6 +11,13 @@ use crate::trace_format::{PRLX_FLAG_SAMPLED, PRLX_FLAG_SNAPSHOT};
 /// Print a summary of the diff result
 pub fn print_summary(result: &DiffResult) {
     println!("\n{}", "=== Diff Summary ===".bold());
+    if let Some(ref cg) = result.cross_gpu_info {
+        println!("{}", "Cross-GPU mode".yellow().bold());
+        println!("  Trace A: {} (warp size {})", cg.arch_a.display(), cg.warp_size_a);
+        println!("  Trace B: {} (warp size {})", cg.arch_b.display(), cg.warp_size_b);
+        println!("  Grid A: {:?}  Block A: {:?}", cg.grid_a, cg.block_a);
+        println!("  Grid B: {:?}  Block B: {:?}", cg.grid_b, cg.block_b);
+    }
     println!("Total warps:          {}", result.total_warps);
     println!("Warps compared:       {}", result.warps_compared);
     println!("Warps diverged:       {}", result.warps_diverged);
@@ -397,6 +405,53 @@ pub fn print_history_context(
 
         shown += 1;
     }
+}
+
+/// Print root-cause classification report
+pub fn print_classification(report: &ClassificationReport, site_map: Option<&SiteMap>) {
+    if report.sites.is_empty() {
+        return;
+    }
+
+    println!("\n{}", "=== Root-Cause Classification ===".bold());
+
+    // Summary
+    if !report.summary.is_empty() {
+        println!("\n{}:", "Category Summary".bold());
+        for (cause, count) in &report.summary {
+            println!("  {}: {} site(s)", cause.label(), count);
+        }
+    }
+
+    // Per-site classification
+    println!("\n{}:", "Per-Site Classification".bold());
+    for sc in &report.sites {
+        let site_str = if let Some(map) = site_map {
+            if let Some(loc) = map.get(sc.site_id) {
+                format!("0x{:08x} ({})", sc.site_id, loc.format_short())
+            } else {
+                format!("0x{:08x}", sc.site_id)
+            }
+        } else {
+            format!("0x{:08x}", sc.site_id)
+        };
+
+        let confidence_pct = (sc.confidence * 100.0) as u32;
+        let label = sc.root_cause.label();
+
+        let colored_label = match &sc.root_cause {
+            crate::classifier::RootCause::RaceCondition => label.red().bold().to_string(),
+            crate::classifier::RootCause::FloatingPointPrecision => label.yellow().bold().to_string(),
+            crate::classifier::RootCause::AlgorithmicBug => label.red().to_string(),
+            crate::classifier::RootCause::MemoryOrdering => label.magenta().bold().to_string(),
+            crate::classifier::RootCause::LoopBoundDifference => label.cyan().to_string(),
+        };
+
+        println!("\n  Site {} → {} ({}% confidence)",
+            site_str.cyan(), colored_label, confidence_pct);
+        println!("    {}", sc.root_cause.description().dimmed());
+    }
+    println!();
 }
 
 /// Print trace file header information

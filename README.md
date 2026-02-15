@@ -148,10 +148,10 @@ with prlx.pytorch_trace("my_model", output="/tmp/trace"):
 
 ```bash
 # Run a script with PyTorch instrumentation
-prlx pytorch script.py
+prlx pytorch run script.py
 
 # NVBit fallback for pre-compiled ops (no recompilation needed)
-prlx pytorch --nvbit script.py
+prlx pytorch run --nvbit script.py
 
 # Check integration status
 prlx pytorch --info

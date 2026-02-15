@@ -7,11 +7,13 @@
 // Following NVBit 1.7.7+ pattern: channel_dev and grid_launch_id are passed
 // to inject functions as arguments (not extern __device__ globals).
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -36,19 +38,37 @@ static struct {
     bool instrument_stores = false;
 } g_config;
 
+// ---- Session manifest entry ----
+struct NvbitSessionEntry {
+    std::string kernel;
+    std::string file;
+    uint32_t launch;       // 0-based session launch index
+    uint32_t grid[3];
+    uint32_t block[3];
+};
+
 // ---- Global state ----
 static prlx::NvbitSiteTable g_site_table;
 static prlx::TraceWriter* g_writer = nullptr;
 static std::mutex g_writer_mutex;
 static uint64_t g_grid_launch_id = 0;
 static uint32_t g_launch_count = 0;
+static uint32_t g_session_launch_idx = 0;  // 0-based index for session manifest
+static std::vector<NvbitSessionEntry> g_session_entries;
 static std::unordered_set<CUfunction> g_instrumented;
 static std::mutex g_instrument_mutex;
 
 // Channel for device→host event transfer
 static ChannelHost g_channel_host;
 static ChannelDev* g_channel_dev = nullptr;
-static volatile bool g_receiver_running = false;
+
+// Receiver thread state machine (following NVBit mem_trace pattern)
+enum RecvThreadState { RECV_INIT, RECV_WORKING, RECV_STOP, RECV_FINISHED };
+static volatile RecvThreadState g_receiver_state = RECV_INIT;
+
+// Statistics counters
+static std::atomic<uint64_t> g_stat_events_received{0};
+static std::atomic<uint64_t> g_stat_events_written{0};
 
 #define CHANNEL_SIZE (1 << 20)
 
@@ -94,11 +114,13 @@ static bool is_func_exit_opcode(const char* opcode) {
 static void* recv_thread_fun(void* args) {
     char* recv_buffer = (char*)malloc(CHANNEL_SIZE);
 
-    while (g_receiver_running) {
+    while (g_receiver_state == RECV_WORKING) {
         uint32_t num_recv_bytes = g_channel_host.recv(recv_buffer, CHANNEL_SIZE);
 
         if (num_recv_bytes > 0) {
             uint32_t num_events = num_recv_bytes / sizeof(prlx_channel_event_t);
+
+            g_stat_events_received.fetch_add(num_events, std::memory_order_relaxed);
 
             std::lock_guard<std::mutex> lock(g_writer_mutex);
             if (g_writer) {
@@ -109,13 +131,36 @@ static void* recv_thread_fun(void* args) {
                     translated.site_id = g_site_table.lookup(events[i].site_id);
                     g_writer->add_event(translated);
                 }
+                g_stat_events_written.fetch_add(num_events, std::memory_order_relaxed);
             }
         } else {
             usleep(100);
         }
     }
 
+    // Drain any remaining events after STOP signal
+    for (;;) {
+        uint32_t num_recv_bytes = g_channel_host.recv(recv_buffer, CHANNEL_SIZE);
+        if (num_recv_bytes == 0) break;
+
+        uint32_t num_events = num_recv_bytes / sizeof(prlx_channel_event_t);
+        g_stat_events_received.fetch_add(num_events, std::memory_order_relaxed);
+
+        std::lock_guard<std::mutex> lock(g_writer_mutex);
+        if (g_writer) {
+            const prlx_channel_event_t* events =
+                reinterpret_cast<const prlx_channel_event_t*>(recv_buffer);
+            for (uint32_t i = 0; i < num_events; i++) {
+                prlx_channel_event_t translated = events[i];
+                translated.site_id = g_site_table.lookup(events[i].site_id);
+                g_writer->add_event(translated);
+            }
+            g_stat_events_written.fetch_add(num_events, std::memory_order_relaxed);
+        }
+    }
+
     free(recv_buffer);
+    g_receiver_state = RECV_FINISHED;
     return nullptr;
 }
 
@@ -166,10 +211,11 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             g_site_table.register_site(
                 sass_pc, event_type, filename, func_name, line);
 
-            // prlx_instr_func_entry(pred, sass_pc, grid_launch_id, pchannel_dev)
+            // prlx_instr_func_entry(pred, sass_pc, sample_rate, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_func_entry", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
+            nvbit_add_call_arg_const_val32(instr, g_config.sample_rate);
             nvbit_add_call_arg_launch_val64(instr, 0);
             nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
             first_instr = false;
@@ -179,11 +225,12 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             event_type = PRLX_EVENT_BRANCH;
             g_site_table.register_site(sass_pc, event_type, filename, func_name, line);
 
-            // prlx_instr_branch(pred, branch_taken, sass_pc, grid_launch_id, pchannel_dev)
+            // prlx_instr_branch(pred, branch_taken, sass_pc, sample_rate, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_branch", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_guard_pred_val(instr);  // branch direction = guard predicate
             nvbit_add_call_arg_const_val32(instr, sass_pc);
+            nvbit_add_call_arg_const_val32(instr, g_config.sample_rate);
             nvbit_add_call_arg_launch_val64(instr, 0);
             nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
         }
@@ -191,12 +238,12 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             event_type = PRLX_EVENT_SHMEM_STORE;
             g_site_table.register_site(sass_pc, event_type, filename, func_name, line);
 
-            // prlx_instr_shmem_store(pred, sass_pc, addr, value, grid_launch_id, pchannel_dev)
+            // prlx_instr_shmem_store(pred, sass_pc, addr, sample_rate, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_shmem_store", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
             nvbit_add_call_arg_mref_addr64(instr, 0);
-            nvbit_add_call_arg_const_val32(instr, 0);
+            nvbit_add_call_arg_const_val32(instr, g_config.sample_rate);
             nvbit_add_call_arg_launch_val64(instr, 0);
             nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
         }
@@ -208,7 +255,7 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
             nvbit_add_call_arg_mref_addr64(instr, 0);
-            nvbit_add_call_arg_const_val32(instr, 0);
+            nvbit_add_call_arg_const_val32(instr, g_config.sample_rate);
             nvbit_add_call_arg_launch_val64(instr, 0);
             nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
         }
@@ -216,12 +263,12 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             event_type = PRLX_EVENT_ATOMIC;
             g_site_table.register_site(sass_pc, event_type, filename, func_name, line);
 
-            // prlx_instr_atomic(pred, sass_pc, addr, operand, grid_launch_id, pchannel_dev)
+            // prlx_instr_atomic(pred, sass_pc, addr, sample_rate, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_atomic", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
             nvbit_add_call_arg_mref_addr64(instr, 0);
-            nvbit_add_call_arg_const_val32(instr, 0);
+            nvbit_add_call_arg_const_val32(instr, g_config.sample_rate);
             nvbit_add_call_arg_launch_val64(instr, 0);
             nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
         }
@@ -229,14 +276,54 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
             event_type = PRLX_EVENT_FUNC_EXIT;
             g_site_table.register_site(sass_pc, event_type, filename, func_name, line);
 
-            // prlx_instr_func_exit(pred, sass_pc, grid_launch_id, pchannel_dev)
+            // prlx_instr_func_exit(pred, sass_pc, sample_rate, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_func_exit", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
+            nvbit_add_call_arg_const_val32(instr, g_config.sample_rate);
             nvbit_add_call_arg_launch_val64(instr, 0);
             nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
         }
     }
+}
+
+// ---- Session manifest writer ----
+static void write_session_manifest() {
+    if (g_config.session_dir.empty() || g_session_entries.empty()) return;
+
+    std::string manifest_path = g_config.session_dir + "/session.json";
+    FILE* f = fopen(manifest_path.c_str(), "w");
+    if (!f) {
+        fprintf(stderr, "[prlx-nvbit] Failed to write session manifest to %s\n",
+                manifest_path.c_str());
+        return;
+    }
+
+    fprintf(f, "[\n");
+    for (size_t i = 0; i < g_session_entries.size(); i++) {
+        const auto& e = g_session_entries[i];
+        // Escape kernel name for JSON
+        std::string escaped_kernel;
+        for (char c : e.kernel) {
+            if (c == '\\') escaped_kernel += "\\\\";
+            else if (c == '"') escaped_kernel += "\\\"";
+            else escaped_kernel += c;
+        }
+        fprintf(f,
+            "  {\"kernel\": \"%s\", \"launch\": %u, "
+            "\"grid\": [%u, %u, %u], \"block\": [%u, %u, %u], "
+            "\"file\": \"launch_%u.prlx\"}%s\n",
+            escaped_kernel.c_str(), e.launch,
+            e.grid[0], e.grid[1], e.grid[2],
+            e.block[0], e.block[1], e.block[2],
+            e.launch,
+            (i + 1 < g_session_entries.size()) ? "," : "");
+    }
+    fprintf(f, "]\n");
+    fclose(f);
+
+    fprintf(stderr, "[prlx-nvbit] Wrote session manifest: %s (%zu launches)\n",
+            manifest_path.c_str(), g_session_entries.size());
 }
 
 // ---- NVBit callbacks ----
@@ -265,6 +352,9 @@ void nvbit_at_init() {
             g_config.filter_pattern.c_str());
 
     g_writer = new prlx::TraceWriter(g_config.buffer_size);
+    if (g_config.sample_rate > 1) {
+        g_writer->set_sample_rate(g_config.sample_rate);
+    }
 }
 
 void nvbit_at_ctx_init(CUcontext ctx) {
@@ -275,7 +365,7 @@ void nvbit_at_ctx_init(CUcontext ctx) {
     // an implicit context before NVBit is ready, breaking context tracking.
     cudaMallocManaged(&g_channel_dev, sizeof(ChannelDev));
 
-    g_receiver_running = true;
+    g_receiver_state = RECV_WORKING;
     g_channel_host.init(0, CHANNEL_SIZE, g_channel_dev,
                         recv_thread_fun, nullptr);
     nvbit_set_tool_pthread(g_channel_host.get_thread());
@@ -284,17 +374,37 @@ void nvbit_at_ctx_init(CUcontext ctx) {
 void nvbit_at_ctx_term(CUcontext ctx) {
     if (!g_config.enabled) return;
 
-    g_receiver_running = false;
+    // Ensure all kernels have completed so the device-side channel has flushed
+    cudaDeviceSynchronize();
+
+    // Signal receiver thread to stop, then spin-wait for it to finish draining
+    if (g_receiver_state != RECV_INIT) {
+        g_receiver_state = RECV_STOP;
+        while (g_receiver_state != RECV_FINISHED) {
+            usleep(100);
+        }
+    }
+
     g_channel_host.destroy(false);
 
-    if (g_writer && g_writer->total_events() > 0) {
+    // Collect stats before writing (writer is still alive here)
+    size_t overflow_count = 0;
+    {
         std::lock_guard<std::mutex> lock(g_writer_mutex);
-        g_writer->write(g_config.trace_path, g_config.compress);
+        if (g_writer) {
+            overflow_count = g_writer->total_overflow();
+            if (g_writer->total_events() > 0) {
+                g_writer->write(g_config.trace_path, g_config.compress);
+            }
+        }
     }
 
     if (g_site_table.size() > 0) {
         g_site_table.export_json(g_config.sites_path);
     }
+
+    // Write session manifest if in session mode
+    write_session_manifest();
 
     delete g_writer;
     g_writer = nullptr;
@@ -306,6 +416,10 @@ void nvbit_at_ctx_term(CUcontext ctx) {
 
     fprintf(stderr, "[prlx-nvbit] Shutdown: %u launches instrumented, %zu sites\n",
             g_launch_count, g_site_table.size());
+    fprintf(stderr, "[prlx-nvbit] Stats: %lu events received, %lu events written, %zu overflows\n",
+            g_stat_events_received.load(std::memory_order_relaxed),
+            g_stat_events_written.load(std::memory_order_relaxed),
+            overflow_count);
 }
 
 void nvbit_at_cuda_event(
@@ -355,11 +469,28 @@ void nvbit_at_cuda_event(
         } else {
             // Post-launch: session mode writes per-kernel files
             if (!g_config.session_dir.empty()) {
+                const char* kernel_name = nvbit_get_func_name(ctx, p->f, true);
+                uint32_t this_launch = g_session_launch_idx++;
+
                 std::lock_guard<std::mutex> lock(g_writer_mutex);
                 if (g_writer && g_writer->total_events() > 0) {
                     std::string kernel_file = g_config.session_dir + "/launch_" +
-                        std::to_string(g_launch_count) + ".prlx";
+                        std::to_string(this_launch) + ".prlx";
                     g_writer->write(kernel_file, g_config.compress);
+
+                    // Record session manifest entry
+                    NvbitSessionEntry entry;
+                    entry.kernel = kernel_name ? kernel_name : "unknown";
+                    entry.file = kernel_file;
+                    entry.launch = this_launch;
+                    entry.grid[0] = p->gridDimX;
+                    entry.grid[1] = p->gridDimY;
+                    entry.grid[2] = p->gridDimZ;
+                    entry.block[0] = p->blockDimX;
+                    entry.block[1] = p->blockDimY;
+                    entry.block[2] = p->blockDimZ;
+                    g_session_entries.push_back(entry);
+
                     g_writer->clear();
                 }
                 // Write site map after each launch so it survives crashes

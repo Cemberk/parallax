@@ -7,6 +7,62 @@ use crate::parser::TraceFile;
 use crate::site_map::SiteRemapper;
 use crate::trace_format::TraceEvent;
 
+/// GPU architecture identifier
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuArch {
+    /// NVIDIA GPU with SM version (e.g., 80 for SM_80)
+    Nvidia { sm: u32 },
+    /// AMD GPU with GFX version (e.g., 1030 for gfx1030)
+    Amd { gfx: u32 },
+    /// Unknown architecture
+    Unknown(u32),
+}
+
+impl GpuArch {
+    /// Determine GPU architecture from cuda_arch field.
+    /// Convention: cuda_arch < 0x1000 → NVIDIA, >= 0x1000 → AMD.
+    pub fn from_cuda_arch(arch: u32) -> Self {
+        if arch == 0 {
+            GpuArch::Unknown(0)
+        } else if arch < 0x1000 {
+            GpuArch::Nvidia { sm: arch }
+        } else {
+            GpuArch::Amd { gfx: arch }
+        }
+    }
+
+    /// Get the warp/wavefront size for this architecture.
+    pub fn warp_size(&self) -> u32 {
+        match self {
+            GpuArch::Nvidia { .. } => 32,
+            GpuArch::Amd { .. } => 64,
+            GpuArch::Unknown(_) => 32, // default assumption
+        }
+    }
+
+    /// Human-readable description
+    pub fn display(&self) -> String {
+        match self {
+            GpuArch::Nvidia { sm } => format!("NVIDIA SM_{}", sm),
+            GpuArch::Amd { gfx } => format!("AMD gfx{}", gfx),
+            GpuArch::Unknown(v) => format!("Unknown({})", v),
+        }
+    }
+}
+
+/// Cross-GPU diff metadata attached to DiffResult
+#[derive(Debug, Clone)]
+pub struct CrossGpuInfo {
+    pub arch_a: GpuArch,
+    pub arch_b: GpuArch,
+    pub warp_size_a: u32,
+    pub warp_size_b: u32,
+    pub grid_a: [u32; 3],
+    pub grid_b: [u32; 3],
+    pub block_a: [u32; 3],
+    pub block_b: [u32; 3],
+}
+
 /// Configuration for differential analysis
 #[derive(Debug, Clone)]
 pub struct DiffConfig {
@@ -20,6 +76,8 @@ pub struct DiffConfig {
     pub force: bool,
     /// Continue comparing after a path divergence (default: stop at first path divergence per warp)
     pub continue_after_path: bool,
+    /// Cross-GPU mode: relax grid/block/warp validation, use popcount mask comparison
+    pub cross_gpu: bool,
 }
 
 impl Default for DiffConfig {
@@ -30,6 +88,7 @@ impl Default for DiffConfig {
             lookahead_window: 32,
             force: false,
             continue_after_path: false,
+            cross_gpu: false,
         }
     }
 }
@@ -80,6 +139,8 @@ pub struct DiffResult {
     pub total_events_b: usize,
     pub warps_compared: usize,
     pub warps_diverged: usize,
+    /// Present when cross-GPU mode is used
+    pub cross_gpu_info: Option<CrossGpuInfo>,
 }
 
 impl DiffResult {
@@ -132,28 +193,44 @@ pub fn diff_traces_with_remap(
     config: &DiffConfig,
     remapper: Option<&SiteRemapper>,
 ) -> Result<DiffResult> {
-    validate_traces(trace_a, trace_b, config.force)?;
+    validate_traces(trace_a, trace_b, config.force, config.cross_gpu)?;
 
     let header_a = trace_a.header();
     let header_b = trace_b.header();
 
-    println!("Comparing {} warps...", header_a.total_warp_slots);
+    // In cross-GPU mode, build warp pairs by flat thread index mapping
+    let (warp_pairs, total_warps_compared) = if config.cross_gpu {
+        build_warp_pairs(header_a, header_b)
+    } else {
+        let n = header_a.total_warp_slots as usize;
+        let pairs: Vec<(u32, Vec<u32>, Vec<u32>)> = (0..n)
+            .map(|w| (w as u32, vec![w as u32], vec![w as u32]))
+            .collect();
+        (pairs, n)
+    };
 
-    let all_divergences: Vec<Vec<Divergence>> = (0..header_a.total_warp_slots as usize)
-        .into_par_iter()
-        .map(|warp_idx| {
-            let (_, events_a) = match trace_a.get_warp_data(warp_idx) {
-                Ok(data) => data,
-                Err(_) => return Vec::new(),
-            };
-            let (_, events_b) = match trace_b.get_warp_data(warp_idx) {
-                Ok(data) => data,
-                Err(_) => return Vec::new(),
-            };
+    eprintln!("Comparing {} warps...", total_warps_compared);
+
+    let all_divergences: Vec<Vec<Divergence>> = warp_pairs
+        .par_iter()
+        .flat_map(|(result_warp, warps_a, warps_b)| {
+            // Collect events from all mapped warps
+            let mut events_a_combined: Vec<TraceEvent> = Vec::new();
+            for &wa in warps_a {
+                if let Ok((_, evts)) = trace_a.get_warp_data(wa as usize) {
+                    events_a_combined.extend_from_slice(evts);
+                }
+            }
+            let mut events_b_combined: Vec<TraceEvent> = Vec::new();
+            for &wb in warps_b {
+                if let Ok((_, evts)) = trace_b.get_warp_data(wb as usize) {
+                    events_b_combined.extend_from_slice(evts);
+                }
+            }
 
             let remapped_b;
             let effective_b = if let Some(remap) = remapper {
-                remapped_b = events_b
+                remapped_b = events_b_combined
                     .iter()
                     .map(|e| {
                         let mut re = *e;
@@ -163,10 +240,14 @@ pub fn diff_traces_with_remap(
                     .collect::<Vec<_>>();
                 &remapped_b[..]
             } else {
-                events_b
+                &events_b_combined[..]
             };
 
-            diff_single_warp(warp_idx as u32, events_a, effective_b, config)
+            if config.cross_gpu {
+                vec![diff_single_warp_cross_gpu(*result_warp, &events_a_combined, effective_b, config)]
+            } else {
+                vec![diff_single_warp(*result_warp, &events_a_combined, effective_b, config)]
+            }
         })
         .collect();
 
@@ -223,25 +304,42 @@ pub fn diff_traces_with_remap(
         divergences.truncate(config.max_divergences);
     }
 
+    let cross_gpu_info = if config.cross_gpu {
+        Some(CrossGpuInfo {
+            arch_a: GpuArch::from_cuda_arch(header_a.cuda_arch),
+            arch_b: GpuArch::from_cuda_arch(header_b.cuda_arch),
+            warp_size_a: GpuArch::from_cuda_arch(header_a.cuda_arch).warp_size(),
+            warp_size_b: GpuArch::from_cuda_arch(header_b.cuda_arch).warp_size(),
+            grid_a: header_a.grid_dim,
+            grid_b: header_b.grid_dim,
+            block_a: header_a.block_dim,
+            block_b: header_b.block_dim,
+        })
+    } else {
+        None
+    };
+
     Ok(DiffResult {
         divergences,
-        total_warps: header_a.total_warp_slots as usize,
+        total_warps: total_warps_compared,
         total_events_a: trace_a.total_events(),
         total_events_b: trace_b.total_events(),
-        warps_compared: header_a.total_warp_slots as usize,
+        warps_compared: total_warps_compared,
         warps_diverged,
+        cross_gpu_info,
     })
 }
 
 /// Validate that two traces are compatible for comparison
-fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile, force: bool) -> Result<()> {
+fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile, force: bool, cross_gpu: bool) -> Result<()> {
     let header_a = trace_a.header();
     let header_b = trace_b.header();
 
     if header_a.kernel_name_hash != header_b.kernel_name_hash {
-        if force {
+        if force || cross_gpu {
             eprintln!(
-                "Warning: Kernel mismatch (--force): '{}' vs '{}'",
+                "Warning: Kernel mismatch ({}): '{}' vs '{}'",
+                if cross_gpu { "--cross-gpu" } else { "--force" },
                 header_a.kernel_name_str(),
                 header_b.kernel_name_str()
             );
@@ -257,31 +355,234 @@ fn validate_traces(trace_a: &TraceFile, trace_b: &TraceFile, force: bool) -> Res
         }
     }
 
-    if header_a.grid_dim != header_b.grid_dim {
-        bail!(
-            "Grid dimension mismatch: {:?} vs {:?}",
-            header_a.grid_dim,
-            header_b.grid_dim
-        );
-    }
+    // In cross-GPU mode, grid/block/warp mismatches are expected
+    if !cross_gpu {
+        if header_a.grid_dim != header_b.grid_dim {
+            bail!(
+                "Grid dimension mismatch: {:?} vs {:?}",
+                header_a.grid_dim,
+                header_b.grid_dim
+            );
+        }
 
-    if header_a.block_dim != header_b.block_dim {
-        bail!(
-            "Block dimension mismatch: {:?} vs {:?}",
-            header_a.block_dim,
-            header_b.block_dim
-        );
-    }
+        if header_a.block_dim != header_b.block_dim {
+            bail!(
+                "Block dimension mismatch: {:?} vs {:?}",
+                header_a.block_dim,
+                header_b.block_dim
+            );
+        }
 
-    if header_a.total_warp_slots != header_b.total_warp_slots {
-        bail!(
-            "Total warp mismatch: {} vs {}",
-            header_a.total_warp_slots,
-            header_b.total_warp_slots
-        );
+        if header_a.total_warp_slots != header_b.total_warp_slots {
+            bail!(
+                "Total warp mismatch: {} vs {}",
+                header_a.total_warp_slots,
+                header_b.total_warp_slots
+            );
+        }
+    } else {
+        if header_a.grid_dim != header_b.grid_dim {
+            eprintln!(
+                "Note (cross-GPU): Grid dimension mismatch: {:?} vs {:?}",
+                header_a.grid_dim, header_b.grid_dim
+            );
+        }
+        if header_a.block_dim != header_b.block_dim {
+            eprintln!(
+                "Note (cross-GPU): Block dimension mismatch: {:?} vs {:?}",
+                header_a.block_dim, header_b.block_dim
+            );
+        }
     }
 
     Ok(())
+}
+
+/// Build warp pairs for cross-GPU comparison using flat thread index mapping.
+/// When warp sizes differ (e.g., 32 vs 64), two NVIDIA warps map to one AMD wavefront.
+fn build_warp_pairs(
+    header_a: &crate::trace_format::TraceFileHeader,
+    header_b: &crate::trace_format::TraceFileHeader,
+) -> (Vec<(u32, Vec<u32>, Vec<u32>)>, usize) {
+    let arch_a = GpuArch::from_cuda_arch(header_a.cuda_arch);
+    let arch_b = GpuArch::from_cuda_arch(header_b.cuda_arch);
+    let ws_a = arch_a.warp_size();
+    let ws_b = arch_b.warp_size();
+
+    let total_threads_a = header_a.total_warp_slots as u64 * ws_a as u64;
+    let total_threads_b = header_b.total_warp_slots as u64 * ws_b as u64;
+    let total_threads = total_threads_a.min(total_threads_b);
+
+    // Use the larger warp size as the mapping granularity
+    let granularity = ws_a.max(ws_b);
+    let num_pairs = ((total_threads + granularity as u64 - 1) / granularity as u64) as u32;
+
+    let mut pairs = Vec::with_capacity(num_pairs as usize);
+    for pair_idx in 0..num_pairs {
+        let thread_start = pair_idx as u64 * granularity as u64;
+        let thread_end = ((pair_idx as u64 + 1) * granularity as u64).min(total_threads);
+
+        // Map to warps in trace A
+        let warp_start_a = (thread_start / ws_a as u64) as u32;
+        let warp_end_a = ((thread_end + ws_a as u64 - 1) / ws_a as u64) as u32;
+        let warps_a: Vec<u32> = (warp_start_a..warp_end_a.min(header_a.total_warp_slots)).collect();
+
+        // Map to warps in trace B
+        let warp_start_b = (thread_start / ws_b as u64) as u32;
+        let warp_end_b = ((thread_end + ws_b as u64 - 1) / ws_b as u64) as u32;
+        let warps_b: Vec<u32> = (warp_start_b..warp_end_b.min(header_b.total_warp_slots)).collect();
+
+        if !warps_a.is_empty() && !warps_b.is_empty() {
+            pairs.push((pair_idx, warps_a, warps_b));
+        }
+    }
+
+    let count = pairs.len();
+    (pairs, count)
+}
+
+/// Cross-GPU variant of diff_single_warp that uses popcount comparison for active masks
+fn diff_single_warp_cross_gpu(
+    warp_idx: u32,
+    events_a: &[TraceEvent],
+    events_b: &[TraceEvent],
+    config: &DiffConfig,
+) -> Vec<Divergence> {
+    let mut divergences = Vec::new();
+    let mut i_a = 0;
+    let mut i_b = 0;
+
+    while i_a < events_a.len() && i_b < events_b.len() {
+        let evt_a = events_a[i_a];
+        let evt_b = events_b[i_b];
+
+        if evt_a.site_id == evt_b.site_id {
+            // Branch comparison (same as normal mode)
+            if evt_a.event_type == 0 && evt_a.branch_dir != evt_b.branch_dir {
+                divergences.push(Divergence {
+                    warp_idx,
+                    event_idx: i_a,
+                    site_id: evt_a.site_id,
+                    kind: DivergenceKind::Branch {
+                        dir_a: evt_a.branch_dir,
+                        dir_b: evt_b.branch_dir,
+                    },
+                    snapshot: None,
+                });
+            }
+
+            // Active mask: use popcount comparison in cross-GPU mode
+            // since lane numbering is architecture-specific
+            let pop_a = evt_a.active_mask.count_ones();
+            let pop_b = evt_b.active_mask.count_ones();
+            if pop_a != pop_b {
+                divergences.push(Divergence {
+                    warp_idx,
+                    event_idx: i_a,
+                    site_id: evt_a.site_id,
+                    kind: DivergenceKind::ActiveMask {
+                        mask_a: evt_a.active_mask,
+                        mask_b: evt_b.active_mask,
+                    },
+                    snapshot: None,
+                });
+            }
+
+            if config.compare_values && evt_a.value_a != evt_b.value_a {
+                divergences.push(Divergence {
+                    warp_idx,
+                    event_idx: i_a,
+                    site_id: evt_a.site_id,
+                    kind: DivergenceKind::Value {
+                        val_a: evt_a.value_a,
+                        val_b: evt_b.value_a,
+                    },
+                    snapshot: None,
+                });
+            }
+
+            i_a += 1;
+            i_b += 1;
+        } else {
+            // Drift detection — same lookahead logic as normal mode
+            let mut found_in_b = None;
+            for k in 1..=config.lookahead_window.min(events_b.len() - i_b) {
+                if i_b + k < events_b.len() && events_b[i_b + k].site_id == evt_a.site_id {
+                    found_in_b = Some(k);
+                    break;
+                }
+            }
+
+            let mut found_in_a = None;
+            for k in 1..=config.lookahead_window.min(events_a.len() - i_a) {
+                if i_a + k < events_a.len() && events_a[i_a + k].site_id == evt_b.site_id {
+                    found_in_a = Some(k);
+                    break;
+                }
+            }
+
+            match (found_in_a, found_in_b) {
+                (Some(k), None) => {
+                    divergences.push(Divergence {
+                        warp_idx, event_idx: i_a, site_id: evt_a.site_id,
+                        kind: DivergenceKind::ExtraEvents { count: k, in_trace_b: false },
+                        snapshot: None,
+                    });
+                    i_a += k;
+                }
+                (None, Some(k)) => {
+                    divergences.push(Divergence {
+                        warp_idx, event_idx: i_a, site_id: evt_b.site_id,
+                        kind: DivergenceKind::ExtraEvents { count: k, in_trace_b: true },
+                        snapshot: None,
+                    });
+                    i_b += k;
+                }
+                (Some(k_a), Some(k_b)) => {
+                    if k_a <= k_b {
+                        divergences.push(Divergence {
+                            warp_idx, event_idx: i_a, site_id: evt_a.site_id,
+                            kind: DivergenceKind::ExtraEvents { count: k_a, in_trace_b: false },
+                            snapshot: None,
+                        });
+                        i_a += k_a;
+                    } else {
+                        divergences.push(Divergence {
+                            warp_idx, event_idx: i_a, site_id: evt_b.site_id,
+                            kind: DivergenceKind::ExtraEvents { count: k_b, in_trace_b: true },
+                            snapshot: None,
+                        });
+                        i_b += k_b;
+                    }
+                }
+                (None, None) => {
+                    divergences.push(Divergence {
+                        warp_idx, event_idx: i_a, site_id: evt_a.site_id,
+                        kind: DivergenceKind::Path { site_a: evt_a.site_id, site_b: evt_b.site_id },
+                        snapshot: None,
+                    });
+                    if config.continue_after_path { i_a += 1; i_b += 1; } else { break; }
+                }
+            }
+        }
+    }
+
+    // Handle trailing events
+    if i_a < events_a.len() {
+        divergences.push(Divergence {
+            warp_idx, event_idx: i_a, site_id: events_a[i_a].site_id,
+            kind: DivergenceKind::ExtraEvents { count: events_a.len() - i_a, in_trace_b: false },
+            snapshot: None,
+        });
+    } else if i_b < events_b.len() {
+        divergences.push(Divergence {
+            warp_idx, event_idx: i_a, site_id: events_b[i_b].site_id,
+            kind: DivergenceKind::ExtraEvents { count: events_b.len() - i_b, in_trace_b: true },
+            snapshot: None,
+        });
+    }
+
+    divergences
 }
 
 /// Compare a single warp's event stream with bounded lookahead

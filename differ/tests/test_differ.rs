@@ -1635,6 +1635,7 @@ fn make_diff_result(divergences: Vec<Divergence>, total_warps: usize) -> DiffRes
         total_events_b: 10,
         warps_compared: total_warps,
         warps_diverged,
+        cross_gpu_info: None,
     }
 }
 

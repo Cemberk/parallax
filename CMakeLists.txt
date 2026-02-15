@@ -131,6 +131,7 @@ endif()
 option(PRLX_BUILD_NVBIT "Build NVBit binary instrumentation tool (experimental)" OFF)
 if(PRLX_BUILD_NVBIT)
     add_subdirectory(lib/nvbit_tool)
+    add_subdirectory(lib/nvbit_tool/tests)
 endif()
 
 # Build tests

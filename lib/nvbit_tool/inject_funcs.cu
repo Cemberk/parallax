@@ -43,16 +43,22 @@ __device__ __forceinline__ void prlx_push_event(
 }
 
 // Branch instrumentation: called at BRA/BRX/JMP SASS instructions
-// Args wired by host: pred, branch_taken, sass_pc, grid_launch_id, pchannel_dev
+// Args wired by host: pred, branch_taken, sass_pc, sample_rate, grid_launch_id, pchannel_dev
 extern "C" __device__ __noinline__ void prlx_instr_branch(
     int pred,
     int branch_taken,
     uint32_t sass_pc,
+    uint32_t sample_rate,
     uint64_t grid_launch_id,
     uint64_t pchannel_dev
 ) {
     if (!pred) return;
     if (prlx_lane_id() != 0) return;
+    if (sample_rate > 1) {
+        uint32_t clk;
+        asm("mov.u32 %0, %%clock;" : "=r"(clk));
+        if (clk % sample_rate != 0) return;
+    }
 
     prlx_channel_event_t evt;
     evt.grid_launch_id = grid_launch_id;
@@ -72,13 +78,18 @@ extern "C" __device__ __noinline__ void prlx_instr_branch(
 extern "C" __device__ __noinline__ void prlx_instr_shmem_store(
     int pred,
     uint32_t sass_pc,
-    uint32_t addr,
-    uint32_t value,
+    uint64_t addr,
+    uint32_t sample_rate,
     uint64_t grid_launch_id,
     uint64_t pchannel_dev
 ) {
     if (!pred) return;
     if (prlx_lane_id() != 0) return;
+    if (sample_rate > 1) {
+        uint32_t clk;
+        asm("mov.u32 %0, %%clock;" : "=r"(clk));
+        if (clk % sample_rate != 0) return;
+    }
 
     prlx_channel_event_t evt;
     evt.grid_launch_id = grid_launch_id;
@@ -88,7 +99,7 @@ extern "C" __device__ __noinline__ void prlx_instr_shmem_store(
     evt.branch_dir = 0;
     evt._pad = 0;
     evt.active_mask = __activemask();
-    evt.value_a = value;
+    evt.value_a = (uint32_t)(addr & 0xFFFFFFFF);
     evt._reserved = 0;
 
     prlx_push_event(pchannel_dev, &evt);
@@ -98,13 +109,18 @@ extern "C" __device__ __noinline__ void prlx_instr_shmem_store(
 extern "C" __device__ __noinline__ void prlx_instr_atomic(
     int pred,
     uint32_t sass_pc,
-    uint32_t addr,
-    uint32_t operand,
+    uint64_t addr,
+    uint32_t sample_rate,
     uint64_t grid_launch_id,
     uint64_t pchannel_dev
 ) {
     if (!pred) return;
     if (prlx_lane_id() != 0) return;
+    if (sample_rate > 1) {
+        uint32_t clk;
+        asm("mov.u32 %0, %%clock;" : "=r"(clk));
+        if (clk % sample_rate != 0) return;
+    }
 
     prlx_channel_event_t evt;
     evt.grid_launch_id = grid_launch_id;
@@ -114,7 +130,7 @@ extern "C" __device__ __noinline__ void prlx_instr_atomic(
     evt.branch_dir = 0;
     evt._pad = 0;
     evt.active_mask = __activemask();
-    evt.value_a = operand;
+    evt.value_a = (uint32_t)(addr & 0xFFFFFFFF);
     evt._reserved = 0;
 
     prlx_push_event(pchannel_dev, &evt);
@@ -124,13 +140,18 @@ extern "C" __device__ __noinline__ void prlx_instr_atomic(
 extern "C" __device__ __noinline__ void prlx_instr_global_store(
     int pred,
     uint32_t sass_pc,
-    uint32_t addr,
-    uint32_t value,
+    uint64_t addr,
+    uint32_t sample_rate,
     uint64_t grid_launch_id,
     uint64_t pchannel_dev
 ) {
     if (!pred) return;
     if (prlx_lane_id() != 0) return;
+    if (sample_rate > 1) {
+        uint32_t clk;
+        asm("mov.u32 %0, %%clock;" : "=r"(clk));
+        if (clk % sample_rate != 0) return;
+    }
 
     prlx_channel_event_t evt;
     evt.grid_launch_id = grid_launch_id;
@@ -140,7 +161,7 @@ extern "C" __device__ __noinline__ void prlx_instr_global_store(
     evt.branch_dir = 0;
     evt._pad = 0;
     evt.active_mask = __activemask();
-    evt.value_a = value;
+    evt.value_a = (uint32_t)(addr & 0xFFFFFFFF);
     evt._reserved = 0;
 
     prlx_push_event(pchannel_dev, &evt);
@@ -150,11 +171,17 @@ extern "C" __device__ __noinline__ void prlx_instr_global_store(
 extern "C" __device__ __noinline__ void prlx_instr_func_entry(
     int pred,
     uint32_t sass_pc,
+    uint32_t sample_rate,
     uint64_t grid_launch_id,
     uint64_t pchannel_dev
 ) {
     if (!pred) return;
     if (prlx_lane_id() != 0) return;
+    if (sample_rate > 1) {
+        uint32_t clk;
+        asm("mov.u32 %0, %%clock;" : "=r"(clk));
+        if (clk % sample_rate != 0) return;
+    }
 
     prlx_channel_event_t evt;
     evt.grid_launch_id = grid_launch_id;
@@ -174,11 +201,17 @@ extern "C" __device__ __noinline__ void prlx_instr_func_entry(
 extern "C" __device__ __noinline__ void prlx_instr_func_exit(
     int pred,
     uint32_t sass_pc,
+    uint32_t sample_rate,
     uint64_t grid_launch_id,
     uint64_t pchannel_dev
 ) {
     if (!pred) return;
     if (prlx_lane_id() != 0) return;
+    if (sample_rate > 1) {
+        uint32_t clk;
+        asm("mov.u32 %0, %%clock;" : "=r"(clk));
+        if (clk % sample_rate != 0) return;
+    }
 
     prlx_channel_event_t evt;
     evt.grid_launch_id = grid_launch_id;

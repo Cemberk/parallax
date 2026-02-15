@@ -753,6 +753,17 @@ def cmd_flamegraph(args):
 def cmd_pytorch(args):
     """PyTorch integration: info, run with instrumentation, or NVBit mode."""
 
+    subcmd = getattr(args, "pytorch_command", None)
+
+    if subcmd == "run":
+        return cmd_pytorch_run(args)
+    elif subcmd == "watch":
+        return cmd_pytorch_watch(args)
+    elif subcmd == "diff-steps":
+        return cmd_pytorch_diff_steps(args)
+    elif subcmd == "report":
+        return cmd_pytorch_report(args)
+
     if args.info:
         print("=== PRLX PyTorch Integration ===")
 
@@ -791,57 +802,200 @@ def cmd_pytorch(args):
 
         print()
         print("Quick start:")
-        print("  prlx pytorch script.py           Run with LLVM pass instrumentation")
-        print("  prlx pytorch --nvbit script.py   Run with NVBit LD_PRELOAD")
+        print("  prlx pytorch run script.py           Run with LLVM pass instrumentation")
+        print("  prlx pytorch run --nvbit script.py   Run with NVBit LD_PRELOAD")
+        print("  prlx pytorch watch script.py         Watch training for anomalies")
         return 0
-
-    if args.script:
-        script_path = Path(args.script)
-        if not script_path.exists():
-            print(f"Error: Script not found: {script_path}", file=sys.stderr)
-            return 1
-
-        env = os.environ.copy()
-
-        if args.nvbit:
-            # NVBit mode: LD_PRELOAD the NVBit tool
-            nvbit_lib = _find_nvbit_tool()
-            if not nvbit_lib:
-                print(
-                    "Error: NVBit tool (libprlx_nvbit.so) not found.\n"
-                    "       Build with: cmake --build build --target prlx_nvbit",
-                    file=sys.stderr,
-                )
-                return 1
-            existing_preload = env.get("LD_PRELOAD", "")
-            env["LD_PRELOAD"] = (
-                f"{existing_preload}:{nvbit_lib}" if existing_preload
-                else str(nvbit_lib)
-            )
-            print(f"Running with NVBit instrumentation: {script_path}")
-        else:
-            # LLVM pass mode
-            pass_plugin = _find_lib.find_pass_plugin()
-            if pass_plugin:
-                existing = env.get("LLVM_PASS_PLUGINS", "")
-                env["LLVM_PASS_PLUGINS"] = (
-                    f"{existing};{pass_plugin}" if existing else str(pass_plugin)
-                )
-            else:
-                print("Warning: LLVM pass plugin not found", file=sys.stderr)
-            print(f"Running with LLVM pass instrumentation: {script_path}")
-
-        if args.output:
-            env["PRLX_TRACE"] = args.output
-
-        cmd = [sys.executable, str(script_path)] + (args.script_args or [])
-        return subprocess.call(cmd, env=env)
 
     print("Usage:")
     print("  prlx pytorch --info              Show integration status")
-    print("  prlx pytorch script.py           Run with instrumentation")
-    print("  prlx pytorch --nvbit script.py   Run with NVBit LD_PRELOAD")
+    print("  prlx pytorch run script.py       Run with instrumentation")
+    print("  prlx pytorch run --nvbit script.py  Run with NVBit LD_PRELOAD")
+    print("  prlx pytorch watch script.py     Watch training for anomalies")
+    print("  prlx pytorch diff-steps DIR --step-a N --step-b M")
+    print("  prlx pytorch report DIR [--json]")
     return 0
+
+
+def cmd_pytorch_run(args):
+    """Run a Python script with PyTorch instrumentation."""
+
+    script_path = Path(args.script)
+    if not script_path.exists():
+        print(f"Error: Script not found: {script_path}", file=sys.stderr)
+        return 1
+
+    env = os.environ.copy()
+
+    if args.nvbit:
+        # NVBit mode: LD_PRELOAD the NVBit tool
+        nvbit_lib = _find_nvbit_tool()
+        if not nvbit_lib:
+            print(
+                "Error: NVBit tool (libprlx_nvbit.so) not found.\n"
+                "       Build with: cmake --build build --target prlx_nvbit",
+                file=sys.stderr,
+            )
+            return 1
+        existing_preload = env.get("LD_PRELOAD", "")
+        env["LD_PRELOAD"] = (
+            f"{existing_preload}:{nvbit_lib}" if existing_preload
+            else str(nvbit_lib)
+        )
+        print(f"Running with NVBit instrumentation: {script_path}")
+    else:
+        # LLVM pass mode
+        pass_plugin = _find_lib.find_pass_plugin()
+        if pass_plugin:
+            existing = env.get("LLVM_PASS_PLUGINS", "")
+            env["LLVM_PASS_PLUGINS"] = (
+                f"{existing};{pass_plugin}" if existing else str(pass_plugin)
+            )
+        else:
+            print("Warning: LLVM pass plugin not found", file=sys.stderr)
+        print(f"Running with LLVM pass instrumentation: {script_path}")
+
+    if args.output:
+        env["PRLX_TRACE"] = args.output
+
+    cmd = [sys.executable, str(script_path)] + (args.script_args or [])
+    return subprocess.call(cmd, env=env)
+
+
+def cmd_pytorch_watch(args):
+    """Run a training script with anomaly monitoring enabled."""
+
+    script_path = Path(args.script)
+    if not script_path.exists():
+        print(f"Error: Script not found: {script_path}", file=sys.stderr)
+        return 1
+
+    env = os.environ.copy()
+    env["PRLX_PYTORCH_WATCH"] = "1"
+
+    if args.output_dir:
+        env["PRLX_TRACE_DIR"] = args.output_dir
+    if args.threshold:
+        env["PRLX_LOSS_THRESHOLD"] = str(args.threshold)
+    if args.grad_threshold:
+        env["PRLX_GRAD_NORM_THRESHOLD"] = str(args.grad_threshold)
+    if args.window:
+        env["PRLX_WINDOW_SIZE"] = str(args.window)
+
+    print(f"Watching training script: {script_path}")
+    print(f"  Output dir: {env.get('PRLX_TRACE_DIR', './prlx_traces')}")
+    print(f"  Loss threshold: {env.get('PRLX_LOSS_THRESHOLD', '2.0')}x moving average")
+    print()
+
+    cmd = [sys.executable, str(script_path)] + (args.script_args or [])
+    return subprocess.call(cmd, env=env)
+
+
+def cmd_pytorch_diff_steps(args):
+    """Diff two training step captures using session mode."""
+
+    trace_dir = Path(args.trace_dir)
+    step_a_dir = trace_dir / f"step_{args.step_a}"
+    step_b_dir = trace_dir / f"step_{args.step_b}"
+
+    if not step_a_dir.exists():
+        print(f"Error: Step directory not found: {step_a_dir}", file=sys.stderr)
+        return 1
+    if not step_b_dir.exists():
+        print(f"Error: Step directory not found: {step_b_dir}", file=sys.stderr)
+        return 1
+
+    print(f"Diffing step {args.step_a} vs step {args.step_b}")
+    print(f"  Step A: {step_a_dir}")
+    print(f"  Step B: {step_b_dir}")
+    print()
+
+    class DiffArgs:
+        def __init__(self):
+            self.trace_a = str(step_a_dir)
+            self.trace_b = str(step_b_dir)
+            self.map = getattr(args, "map", None)
+            self.values = getattr(args, "values", False)
+            self.verbose = getattr(args, "verbose", False)
+            self.limit = getattr(args, "limit", None)
+            self.lookahead = getattr(args, "lookahead", None)
+            self.max_shown = getattr(args, "max_shown", 10)
+            self.tui = False
+            self.float = False
+            self.force = False
+            self.session = True
+
+    return cmd_diff(DiffArgs())
+
+
+def cmd_pytorch_report(args):
+    """Parse anomaly log and summarize training monitoring results."""
+
+    trace_dir = Path(args.trace_dir)
+
+    # Check for report file
+    report_path = trace_dir / "training_report.json"
+    anomaly_log_path = trace_dir / "anomaly_log.jsonl"
+
+    if not trace_dir.exists():
+        print(f"Error: Trace directory not found: {trace_dir}", file=sys.stderr)
+        return 1
+
+    # Try training_report.json first
+    if report_path.exists():
+        with open(report_path) as f:
+            report = json.load(f)
+
+        if args.json:
+            print(json.dumps(report, indent=2))
+            return 0
+
+        print("=== PRLX Training Report ===")
+        print(f"  Output dir:       {report.get('output_dir', str(trace_dir))}")
+        print(f"  Total anomalies:  {report.get('total_anomalies', 0)}")
+        print(f"  Captures:         {report.get('captures', 0)}")
+        print(f"  Loss history:     {report.get('loss_history_length', 0)} steps")
+        print()
+
+        anomalies = report.get("anomalies", [])
+        if anomalies:
+            print("Anomalies:")
+            for a in anomalies:
+                print(f"  Step {a['step']}: {a['type']} "
+                      f"(value={a['value']:.6g}, threshold={a['threshold']:.6g}, "
+                      f"moving_avg={a['moving_average']:.6g})")
+        else:
+            print("No anomalies detected.")
+
+        return 0
+
+    # Fall back to anomaly_log.jsonl
+    if anomaly_log_path.exists():
+        anomalies = []
+        with open(anomaly_log_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    anomalies.append(json.loads(line))
+
+        if args.json:
+            print(json.dumps({"anomalies": anomalies}, indent=2))
+            return 0
+
+        print("=== PRLX Anomaly Log ===")
+        print(f"  Total anomalies: {len(anomalies)}")
+        print()
+
+        for a in anomalies:
+            print(f"  Step {a['step']}: {a['type']} "
+                  f"(value={a['value']:.6g}, threshold={a['threshold']:.6g}, "
+                  f"moving_avg={a['moving_average']:.6g})")
+
+        return 0
+
+    print(f"Error: No training report or anomaly log found in {trace_dir}",
+          file=sys.stderr)
+    return 1
 
 
 def _find_nvbit_tool():
@@ -911,8 +1065,13 @@ Examples:
 
   # PyTorch integration
   prlx pytorch --info
-  prlx pytorch train.py
-  prlx pytorch --nvbit train.py
+  prlx pytorch run train.py
+  prlx pytorch run --nvbit train.py
+
+  # Training loop monitoring
+  prlx pytorch watch train.py --threshold 3.0 --output-dir ./traces
+  prlx pytorch diff-steps ./traces --step-a 100 --step-b 105
+  prlx pytorch report ./traces --json
         """,
     )
 
@@ -1088,14 +1247,58 @@ Examples:
         "pytorch", help="PyTorch integration and instrumentation")
     p_pytorch.add_argument("--info", action="store_true",
                            help="Show PyTorch integration status")
-    p_pytorch.add_argument("--nvbit", action="store_true",
-                           help="Use NVBit LD_PRELOAD instead of LLVM pass")
-    p_pytorch.add_argument("-o", "--output",
-                           help="Output trace file (sets PRLX_TRACE)")
-    p_pytorch.add_argument("script", nargs="?",
-                           help="Python script to run")
-    p_pytorch.add_argument("script_args", nargs="*",
-                           help="Arguments to pass to the script")
+
+    pytorch_subs = p_pytorch.add_subparsers(dest="pytorch_command",
+                                             help="PyTorch subcommand")
+
+    # pytorch run (script execution)
+    p_pt_run = pytorch_subs.add_parser(
+        "run", help="Run a Python script with PyTorch instrumentation")
+    p_pt_run.add_argument("script", help="Python script to run")
+    p_pt_run.add_argument("--nvbit", action="store_true",
+                          help="Use NVBit LD_PRELOAD instead of LLVM pass")
+    p_pt_run.add_argument("-o", "--output",
+                          help="Output trace file (sets PRLX_TRACE)")
+    p_pt_run.add_argument("script_args", nargs="*",
+                          help="Arguments to pass to the script")
+
+    # pytorch watch
+    p_pt_watch = pytorch_subs.add_parser(
+        "watch", help="Run training script with anomaly monitoring")
+    p_pt_watch.add_argument("script", help="Training script to run")
+    p_pt_watch.add_argument("--output-dir",
+                            help="Directory for trace captures")
+    p_pt_watch.add_argument("--threshold", type=float,
+                            help="Loss spike threshold multiplier (default: 2.0)")
+    p_pt_watch.add_argument("--grad-threshold", type=float,
+                            help="Gradient norm threshold (default: 100.0)")
+    p_pt_watch.add_argument("--window", type=int,
+                            help="Moving average window size (default: 50)")
+    p_pt_watch.add_argument("script_args", nargs="*",
+                            help="Arguments to pass to the script")
+
+    # pytorch diff-steps
+    p_pt_diff = pytorch_subs.add_parser(
+        "diff-steps", help="Diff two captured training steps")
+    p_pt_diff.add_argument("trace_dir",
+                           help="Trace output directory from watch")
+    p_pt_diff.add_argument("--step-a", type=int, required=True,
+                           help="First step number")
+    p_pt_diff.add_argument("--step-b", type=int, required=True,
+                           help="Second step number")
+    p_pt_diff.add_argument("--map", help="Site mapping file")
+    p_pt_diff.add_argument("--values", action="store_true",
+                           help="Compare operand values")
+    p_pt_diff.add_argument("-v", "--verbose", action="store_true",
+                           help="Verbose output")
+
+    # pytorch report
+    p_pt_report = pytorch_subs.add_parser(
+        "report", help="Show training monitoring report")
+    p_pt_report.add_argument("trace_dir",
+                             help="Trace output directory")
+    p_pt_report.add_argument("--json", action="store_true",
+                             help="Output as JSON")
 
     args = parser.parse_args()
 

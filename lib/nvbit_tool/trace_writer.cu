@@ -10,6 +10,10 @@
 #include <cstring>
 #include <vector>
 
+#ifdef PRLX_HAS_ZSTD
+#include <zstd.h>
+#endif
+
 namespace prlx {
 
 void TraceWriter::add_event(const prlx_channel_event_t& evt) {
@@ -54,6 +58,10 @@ bool TraceWriter::write(const std::string& path, bool compress) {
     header.magic = PRLX_MAGIC;
     header.version = PRLX_VERSION;
     header.flags = 0;
+    if (sample_rate_ > 1) {
+        header.flags |= PRLX_FLAG_SAMPLED;
+    }
+    header.sample_rate = sample_rate_;
 
     // Kernel name hash (FNV-1a, same as LLVM pass)
     uint32_t name_hash = 0x811c9dc5;
@@ -132,17 +140,57 @@ bool TraceWriter::write(const std::string& path, bool compress) {
         return false;
     }
 
-    // NVBit trace writer does not support compression yet.
-    // The LLVM pass runtime (prlx_host.cu) handles zstd compression.
-    (void)compress;
-    fwrite(buffer.data(), 1, buffer.size(), f);
+#ifdef PRLX_HAS_ZSTD
+    if (compress && buffer.size() > sizeof(TraceFileHeader)) {
+        // Set compress flag in header
+        TraceFileHeader* hdr = reinterpret_cast<TraceFileHeader*>(buffer.data());
+        hdr->flags |= PRLX_FLAG_COMPRESS;
+
+        // Write header uncompressed
+        fwrite(buffer.data(), 1, sizeof(TraceFileHeader), f);
+
+        // Compress payload (everything after header)
+        const uint8_t* payload = buffer.data() + sizeof(TraceFileHeader);
+        size_t payload_size = buffer.size() - sizeof(TraceFileHeader);
+        size_t compress_bound = ZSTD_compressBound(payload_size);
+        std::vector<uint8_t> compressed(compress_bound);
+        size_t compressed_size = ZSTD_compress(
+            compressed.data(), compress_bound,
+            payload, payload_size, 1);
+
+        if (!ZSTD_isError(compressed_size)) {
+            fwrite(compressed.data(), 1, compressed_size, f);
+            fprintf(stderr, "[prlx-nvbit] Wrote trace: %s (%zu bytes compressed from %zu, %u warps, %zu events)\n",
+                    path.c_str(), sizeof(TraceFileHeader) + compressed_size,
+                    buffer.size(), total_warp_slots, total_events_);
+        } else {
+            // Compression failed, fall back to uncompressed
+            hdr->flags &= ~PRLX_FLAG_COMPRESS;
+            fseek(f, 0, SEEK_SET);
+            fwrite(buffer.data(), 1, buffer.size(), f);
+            fprintf(stderr, "[prlx-nvbit] Wrote trace: %s (%zu bytes, %u warps, %zu events) [zstd failed]\n",
+                    path.c_str(), buffer.size(), total_warp_slots, total_events_);
+        }
+    } else
+#endif
+    {
+        (void)compress;
+        fwrite(buffer.data(), 1, buffer.size(), f);
+        fprintf(stderr, "[prlx-nvbit] Wrote trace: %s (%zu bytes, %u warps, %zu events)\n",
+                path.c_str(), buffer.size(), total_warp_slots, total_events_);
+    }
 
     fclose(f);
 
-    fprintf(stderr, "[prlx-nvbit] Wrote trace: %s (%zu bytes, %u warps, %zu events)\n",
-            path.c_str(), buffer.size(), total_warp_slots, total_events_);
-
     return true;
+}
+
+size_t TraceWriter::total_overflow() const {
+    size_t count = 0;
+    for (const auto& [_, buf] : warp_events_) {
+        count += buf.overflow_count;
+    }
+    return count;
 }
 
 void TraceWriter::clear() {

@@ -3,8 +3,22 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
+use crate::classifier::ClassificationReport;
 use crate::differ::{DiffResult, DivergenceKind, SessionDiffResult};
 use crate::site_map::SiteMap;
+
+/// Cross-GPU metadata in JSON output
+#[derive(Serialize)]
+pub struct JsonCrossGpuInfo {
+    pub arch_a: String,
+    pub arch_b: String,
+    pub warp_size_a: u32,
+    pub warp_size_b: u32,
+    pub grid_a: [u32; 3],
+    pub grid_b: [u32; 3],
+    pub block_a: [u32; 3],
+    pub block_b: [u32; 3],
+}
 
 /// Machine-readable diff report for CI pipelines
 #[derive(Serialize)]
@@ -21,6 +35,8 @@ pub struct JsonDiffReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub threshold: Option<usize>,
     pub passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_gpu: Option<JsonCrossGpuInfo>,
 }
 
 /// Individual divergence in JSON output
@@ -55,6 +71,47 @@ pub struct JsonKernelResult {
     pub divergences: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Machine-readable classification report
+#[derive(Serialize)]
+pub struct JsonClassificationReport {
+    pub sites: Vec<JsonSiteClassification>,
+    pub summary: HashMap<String, usize>,
+}
+
+/// Per-site classification in JSON output
+#[derive(Serialize)]
+pub struct JsonSiteClassification {
+    pub site_id: String,
+    pub root_cause: String,
+    pub confidence: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_location: Option<String>,
+}
+
+/// Format a ClassificationReport as JSON
+pub fn format_json_classification(
+    report: &ClassificationReport,
+    site_map: Option<&SiteMap>,
+) -> JsonClassificationReport {
+    let sites = report.sites.iter().map(|sc| {
+        let source_location = site_map
+            .and_then(|m| m.get(sc.site_id))
+            .map(|loc| loc.format());
+        JsonSiteClassification {
+            site_id: format!("0x{:08x}", sc.site_id),
+            root_cause: sc.root_cause.label().to_string(),
+            confidence: sc.confidence,
+            source_location,
+        }
+    }).collect();
+
+    let summary = report.summary.iter()
+        .map(|(cause, count)| (cause.label().to_string(), *count))
+        .collect();
+
+    JsonClassificationReport { sites, summary }
 }
 
 fn kind_str(kind: &DivergenceKind) -> &'static str {
@@ -115,6 +172,17 @@ pub fn format_json_report(
         })
         .collect();
 
+    let cross_gpu = result.cross_gpu_info.as_ref().map(|cg| JsonCrossGpuInfo {
+        arch_a: cg.arch_a.display(),
+        arch_b: cg.arch_b.display(),
+        warp_size_a: cg.warp_size_a,
+        warp_size_b: cg.warp_size_b,
+        grid_a: cg.grid_a,
+        grid_b: cg.grid_b,
+        block_a: cg.block_a,
+        block_b: cg.block_b,
+    });
+
     JsonDiffReport {
         status,
         total_divergences: result.divergences.len(),
@@ -127,6 +195,7 @@ pub fn format_json_report(
         divergences,
         threshold: Some(threshold),
         passed,
+        cross_gpu,
     }
 }
 
