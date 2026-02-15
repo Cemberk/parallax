@@ -64,3 +64,4 @@ python/prlx/data/include/
 .venv/
 *.deb
 demos/
+tests/test_all.sh

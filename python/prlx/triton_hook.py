@@ -212,10 +212,21 @@ def _wrap_triton_launch(verbose: bool):
                     grid_dim = tuple(resolved) + (1,) * (3 - len(resolved))
                 else:
                     grid_dim = (int(resolved), 1, 1)
-            except Exception:
+            except Exception as exc:
                 # If grid lambda fails (e.g. needs meta keys we don't have),
                 # fall back to num_warps-based estimate to avoid OOB writes.
-                num_warps = kwargs.get("num_warps", 4)
+                # Set PRLX_STRICT_GRID=1 to fail fast instead.
+                if os.environ.get("PRLX_STRICT_GRID", "0") == "1":
+                    raise RuntimeError(
+                        f"Failed to resolve Triton grid for kernel "
+                        f"{getattr(self, '__name__', 'triton_kernel')}: {exc}"
+                    ) from exc
+                num_warps = int(kwargs.get("num_warps", 4))
+                print(
+                    "[prlx] Warning: failed to resolve Triton grid lambda; "
+                    f"using fallback grid=({num_warps}, 1, 1): {exc}",
+                    file=sys.stderr,
+                )
                 grid_dim = (num_warps, 1, 1)
         elif isinstance(grid, (tuple, list)):
             grid_dim = tuple(grid) + (1,) * (3 - len(grid))

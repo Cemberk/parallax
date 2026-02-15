@@ -10,6 +10,7 @@ import json
 import math
 import os
 import shutil
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -94,7 +95,14 @@ class StepContext:
                     session=str(self._session_dir),
                 )
                 self._wrapper.__enter__()
-            except Exception:
+            except Exception as exc:
+                if os.environ.get("PRLX_STRICT_CAPTURE", "0") == "1":
+                    raise
+                print(
+                    "[prlx] Warning: failed to initialize step capture "
+                    f"for step {self._step}: {exc}",
+                    file=sys.stderr,
+                )
                 self._wrapper = None
 
         return self

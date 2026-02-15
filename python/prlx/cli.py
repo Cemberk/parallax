@@ -142,7 +142,8 @@ def find_clang_for_pass(pass_lib):
 
 
 def find_best_ptxas_arch(gpu_cc):
-    # Falls back to SM 90 if nvcc is unavailable
+    # Prefer the best architecture reported by nvcc, bounded by GPU CC.
+    # If nvcc is unavailable, fall back to detected GPU CC.
     try:
         result = subprocess.run(
             ["nvcc", "--list-gpu-arch"],
@@ -164,7 +165,7 @@ def find_best_ptxas_arch(gpu_cc):
         pass  # nvcc not installed
     except subprocess.SubprocessError:
         pass  # nvcc failed
-    return 90
+    return gpu_cc
 
 
 def cmd_diff(args):
@@ -665,14 +666,26 @@ def cmd_assert(args):
 
     # Parse JSON and print human-readable summary.
     # The Rust binary may print non-JSON lines (e.g. "Loading traces...")
-    # before the JSON object, so extract the JSON portion.
+    # before the JSON object, so scan for the first decodable JSON object.
     stdout = result.stdout
-    json_start = stdout.find("{")
     try:
-        if json_start >= 0:
-            data = json.loads(stdout[json_start:])
-        else:
-            data = json.loads(stdout)
+        data = None
+        decoder = json.JSONDecoder()
+
+        for i, ch in enumerate(stdout):
+            if ch != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(stdout[i:])
+                if isinstance(candidate, dict):
+                    data = candidate
+                    break
+            except json.JSONDecodeError:
+                continue
+
+        if data is None:
+            raise json.JSONDecodeError("no JSON object found", stdout, 0)
+
         count = data.get("total_divergences", data.get("divergence_count", 0))
     except (json.JSONDecodeError, KeyError):
         # If JSON parsing fails, fall back to exit code
