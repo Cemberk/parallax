@@ -65,3 +65,4 @@ python/prlx/data/include/
 *.deb
 demos/
 tests/test_all.sh
+third_party/
