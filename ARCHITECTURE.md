@@ -149,6 +149,13 @@ Compares two `.prlx` trace files and identifies divergences.
   - If resync point found: report `ExtraEvents` and resume
   - If not found within window: report `Path` divergence
 
+**Session mode** (`--session`):
+- Compares two session directories (each containing a `session.json` manifest
+  and per-kernel `.prlx` files)
+- Matches launches by kernel name + launch index
+- Reports unmatched launches in either session (kernels in A but not B, or vice versa)
+- Warns on grid/block dimension mismatches between matching launches
+
 **Output modes:**
 - Summary: "N divergences across M warps at K sites"
 - Detailed: per-site, per-warp, per-event divergence report with optional
@@ -164,6 +171,9 @@ User-facing interface and Triton integration.
 - `prlx.diff_traces(a, b)` -> shells out to `prlx-diff`
 - `prlx compile` CLI -> wraps clang with the pass plugin
 - `prlx diff` CLI -> wraps `prlx-diff` with auto site-map discovery
+- `prlx session capture` CLI -> runs binary with `PRLX_SESSION` env var
+- `prlx session inspect` CLI -> reads and prints a session manifest
+- `prlx session diff` CLI -> diffs two session directories
 
 **Triton hook** (`triton_hook.py`):
 - Intercepts `stages["llir"]` via `knobs.runtime.add_stages_inspection_hook`

@@ -632,6 +632,11 @@ Examples:
   # Compile with automatic instrumentation
   prlx compile kernel.cu -o my_kernel
 
+  # Multi-kernel session operations
+  prlx session capture ./my_pipeline -o /tmp/sess_a
+  prlx session inspect /tmp/sess_a
+  prlx session diff /tmp/sess_a /tmp/sess_b
+
   # Triton integration info
   prlx triton --info
         """,
