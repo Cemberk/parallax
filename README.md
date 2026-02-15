@@ -109,7 +109,7 @@ PRLX has three backends for instrumenting GPU code:
 
 1. **LLVM pass** (`lib/pass/`) — loaded as `-fpass-plugin` during compilation (clang) or injected between Triton's `make_llir` and `make_ptx` stages. Walks the NVPTX IR, inserts calls to `__prlx_record_branch` / `__prlx_record_value` at every branch and comparison. For Triton's branchless single-BB kernels, it detects predicated ops (`icmp` feeding inline PTX asm or `select`).
 
-2. **NVBit tool** (`lib/nvbit_tool/`) — SASS-level binary instrumentation via NVBit. Works on closed-source kernels where you don't have IR access.
+2. **NVBit tool** (`lib/nvbit_tool/`) _(experimental)_ — SASS-level binary instrumentation via NVBit. Works on closed-source kernels where you don't have IR access. Less tested than the LLVM pass; use for cases where recompilation is not possible.
 
 3. **Runtime** (`lib/runtime/`) — device-side ring buffers (one per warp) that record events, value history, and per-lane comparison operand snapshots. Host hooks (`prlx_pre_launch` / `prlx_post_launch`) manage allocation and readback.
 
@@ -120,7 +120,7 @@ Traces are written to `.prlx` files (custom binary format, optionally zstd-compr
 ```
 lib/pass/           LLVM instrumentation pass (libPrlxPass.so)
 lib/runtime/        device-side recording + host hooks
-lib/nvbit_tool/     NVBit binary instrumentation backend
+lib/nvbit_tool/     NVBit binary instrumentation backend (experimental)
 lib/common/         shared trace format header
 differ/             Rust differ + TUI (prlx-diff)
 python/prlx/        trace reader, Triton hook, runtime FFI, CLI

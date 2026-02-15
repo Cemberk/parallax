@@ -1,12 +1,9 @@
-//! Integration tests for the differential analysis engine
-
 use prlx_diff::differ::{diff_traces, DiffConfig, DivergenceKind};
 use prlx_diff::trace_format::*;
 use std::io::Write;
 use bytemuck;
 use tempfile::NamedTempFile;
 
-/// Helper: Create a minimal valid trace file with given events
 fn create_test_trace(kernel_name: &str, events: &[Vec<TraceEvent>]) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
 
@@ -79,7 +76,6 @@ fn create_test_trace(kernel_name: &str, events: &[Vec<TraceEvent>]) -> NamedTemp
     file
 }
 
-/// Test 1: Identical traces should produce no divergences
 #[test]
 fn test_identical_traces() {
     let events = vec![
@@ -127,7 +123,6 @@ fn test_identical_traces() {
     assert_eq!(result.warps_diverged, 0);
 }
 
-/// Test 2: Active mask mismatch should be detected
 #[test]
 fn test_active_mask_divergence() {
     let events_a = vec![vec![
@@ -195,7 +190,6 @@ fn test_active_mask_divergence() {
     }
 }
 
-/// Test 3: Extra events (drift) should be detected and re-synced
 #[test]
 fn test_extra_events_resync() {
     // Trace A: 3 events
@@ -301,7 +295,6 @@ fn test_extra_events_resync() {
     }
 }
 
-/// Test 4: Branch direction divergence
 #[test]
 fn test_branch_direction_divergence() {
     let events_a = vec![vec![TraceEvent {
@@ -343,7 +336,6 @@ fn test_branch_direction_divergence() {
     }
 }
 
-/// Test 5: True path divergence (different sites, no re-sync possible)
 #[test]
 fn test_path_divergence() {
     let events_a = vec![vec![
@@ -416,7 +408,6 @@ fn test_path_divergence() {
     }
 }
 
-/// Test 6: Value comparison (when enabled)
 #[test]
 fn test_value_divergence() {
     let events_a = vec![vec![TraceEvent {
@@ -465,8 +456,6 @@ fn test_value_divergence() {
     }
 }
 
-/// Helper: Create a trace file with snapshot data attached.
-/// The snapshot section follows directly after the event buffers.
 fn create_trace_with_snapshots(
     kernel_name: &str,
     events: &[Vec<TraceEvent>],
@@ -577,9 +566,6 @@ fn create_trace_with_snapshots(
     file
 }
 
-/// Test 7: Snapshot data flows through parser → differ → report
-/// Verifies the full pipeline: trace with snapshot section → parser reads it →
-/// differ attaches SnapshotContext to branch divergence → per-lane operands accessible.
 #[test]
 fn test_snapshot_integration() {
     let branch_site = 0x1000u32;
@@ -690,4 +676,731 @@ fn test_snapshot_integration() {
         assert_ne!(snap_ctx.rhs_a[lane], snap_ctx.rhs_b[lane],
             "RHS should differ (different threshold)");
     }
+}
+
+// ============================================================
+// Error handling & validation tests
+// ============================================================
+
+fn create_test_trace_custom(
+    kernel_name: &str,
+    kernel_hash: u64,
+    grid_dim: [u32; 3],
+    block_dim: [u32; 3],
+    events: &[Vec<TraceEvent>],
+) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+
+    let mut header = TraceFileHeader {
+        magic: PRLX_MAGIC,
+        version: PRLX_VERSION,
+        flags: 0,
+        kernel_name_hash: kernel_hash,
+        kernel_name: [0; 64],
+        grid_dim,
+        block_dim,
+        num_warps_per_block: 1,
+        total_warp_slots: events.len() as u32,
+        events_per_warp: PRLX_EVENTS_PER_WARP as u32,
+        _pad: 0,
+        timestamp: 1234567890,
+        cuda_arch: 80,
+        history_depth: 0,
+        history_section_offset: 0,
+        sample_rate: 0,
+        snapshot_depth: 0,
+        snapshot_section_offset: 0,
+    };
+
+    let name_bytes = kernel_name.as_bytes();
+    let copy_len = name_bytes.len().min(63);
+    header.kernel_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    file.write_all(bytemuck::bytes_of(&header)).unwrap();
+
+    for warp_events in events {
+        let warp_header = WarpBufferHeader {
+            write_idx: warp_events.len() as u32,
+            overflow_count: 0,
+            num_events: warp_events.len() as u32,
+            total_event_count: 0,
+        };
+        file.write_all(bytemuck::bytes_of(&warp_header)).unwrap();
+
+        for event in warp_events {
+            file.write_all(bytemuck::bytes_of(event)).unwrap();
+        }
+
+        let remaining = PRLX_EVENTS_PER_WARP - warp_events.len();
+        let zero_event = TraceEvent {
+            site_id: 0, event_type: 0, branch_dir: 0, _reserved: 0,
+            active_mask: 0, value_a: 0,
+        };
+        for _ in 0..remaining {
+            file.write_all(bytemuck::bytes_of(&zero_event)).unwrap();
+        }
+    }
+
+    file.flush().unwrap();
+    file
+}
+
+#[test]
+fn test_force_flag_allows_kernel_mismatch() {
+    let events = vec![vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0,
+        active_mask: 0xFFFFFFFF, value_a: 42,
+    }]];
+
+    let trace_a_file = create_test_trace_custom("kernel_a", 0xAAAA, [1,1,1], [32,1,1], &events);
+    let trace_b_file = create_test_trace_custom("kernel_b", 0xBBBB, [1,1,1], [32,1,1], &events);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let config = DiffConfig { force: true, ..Default::default() };
+    let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
+    assert!(result.is_identical(), "Identical events should produce no divergences with --force");
+}
+
+#[test]
+fn test_kernel_name_mismatch_error() {
+    let events = vec![vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0,
+        active_mask: 0xFFFFFFFF, value_a: 42,
+    }]];
+
+    let trace_a_file = create_test_trace_custom("kernel_a", 0xAAAA, [1,1,1], [32,1,1], &events);
+    let trace_b_file = create_test_trace_custom("kernel_b", 0xBBBB, [1,1,1], [32,1,1], &events);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default());
+    assert!(result.is_err(), "Should error on kernel name mismatch without --force");
+    let err_msg = format!("{}", result.err().unwrap());
+    assert!(err_msg.contains("Kernel mismatch"), "Error: {}", err_msg);
+}
+
+#[test]
+fn test_grid_dim_mismatch_error() {
+    let events = vec![vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0,
+        active_mask: 0xFFFFFFFF, value_a: 42,
+    }]];
+
+    let trace_a_file = create_test_trace_custom("kern", 0x1234, [2,1,1], [32,1,1], &events);
+    let trace_b_file = create_test_trace_custom("kern", 0x1234, [4,1,1], [32,1,1], &events);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default());
+    assert!(result.is_err());
+    let err_msg = format!("{}", result.err().unwrap());
+    assert!(err_msg.contains("Grid dimension mismatch"), "Error: {}", err_msg);
+}
+
+#[test]
+fn test_block_dim_mismatch_error() {
+    let events = vec![vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0,
+        active_mask: 0xFFFFFFFF, value_a: 42,
+    }]];
+
+    let trace_a_file = create_test_trace_custom("kern", 0x1234, [1,1,1], [32,1,1], &events);
+    let trace_b_file = create_test_trace_custom("kern", 0x1234, [1,1,1], [64,1,1], &events);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default());
+    assert!(result.is_err());
+    let err_msg = format!("{}", result.err().unwrap());
+    assert!(err_msg.contains("Block dimension mismatch"), "Error: {}", err_msg);
+}
+
+// ============================================================
+// Config option tests
+// ============================================================
+
+#[test]
+fn test_max_divergences_limit() {
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 },
+        TraceEvent { site_id: 0x3000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 3 },
+        TraceEvent { site_id: 0x4000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 4 },
+    ]];
+
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 },
+        TraceEvent { site_id: 0x3000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 3 },
+        TraceEvent { site_id: 0x4000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 4 },
+    ]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let config = DiffConfig { max_divergences: 2, ..Default::default() };
+    let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
+
+    assert_eq!(result.divergences.len(), 2, "Should truncate to max_divergences=2");
+}
+
+#[test]
+fn test_lookahead_window_size() {
+    // Both traces share 0x1000 first, then B has 5 extra events before rejoining at 0x9000
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x9000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 9 },
+    ]];
+
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x3000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 3 },
+        TraceEvent { site_id: 0x4000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 4 },
+        TraceEvent { site_id: 0x5000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 5 },
+        TraceEvent { site_id: 0x6000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 6 },
+        TraceEvent { site_id: 0x7000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 7 },
+        TraceEvent { site_id: 0x9000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 9 },
+    ]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    // After matching 0x1000, A has 0x9000, B has 0x3000. Resync target (0x9000) is 5 events ahead in B.
+    // With window=2, can't reach it → path divergence
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+    let result_small = diff_traces(&trace_a, &trace_b, &DiffConfig { lookahead_window: 2, ..Default::default() }).unwrap();
+    assert!(result_small.divergences.iter().any(|d| matches!(d.kind, DivergenceKind::Path { .. })),
+        "Small lookahead should result in path divergence");
+
+    // With window=32, finds 0x9000 → extra events detection
+    let trace_a2 = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b2 = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+    let result_large = diff_traces(&trace_a2, &trace_b2, &DiffConfig { lookahead_window: 32, ..Default::default() }).unwrap();
+    assert!(result_large.divergences.iter().any(|d| matches!(d.kind, DivergenceKind::ExtraEvents { .. })),
+        "Large lookahead should detect extra events and resync");
+    assert!(!result_large.divergences.iter().any(|d| matches!(d.kind, DivergenceKind::Path { .. })),
+        "Large lookahead should not produce path divergence");
+}
+
+// ============================================================
+// Edge case tests
+// ============================================================
+
+#[test]
+fn test_empty_warps() {
+    let events: Vec<Vec<TraceEvent>> = vec![vec![], vec![]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events);
+    let trace_b_file = create_test_trace("test_kernel", &events);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    assert!(result.is_identical(), "Empty warps should be identical");
+    assert_eq!(result.total_events_a, 0);
+    assert_eq!(result.total_events_b, 0);
+    assert_eq!(result.total_warps, 2);
+}
+
+#[test]
+fn test_single_event_traces() {
+    let events = vec![vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0,
+        active_mask: 0xFFFFFFFF, value_a: 42,
+    }]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events);
+    let trace_b_file = create_test_trace("test_kernel", &events);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    assert!(result.is_identical());
+    assert_eq!(result.total_events_a, 1);
+}
+
+#[test]
+fn test_multiple_warps_mixed() {
+    let events_a = vec![
+        vec![TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 }],
+        vec![TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 }],
+        vec![TraceEvent { site_id: 0x3000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 3 }],
+        vec![TraceEvent { site_id: 0x4000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 4 }],
+    ];
+
+    let events_b = vec![
+        vec![TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 }],
+        vec![TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 }], // dir flipped
+        vec![TraceEvent { site_id: 0x3000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 3 }],
+        vec![TraceEvent { site_id: 0x4000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0x0000FFFF, value_a: 4 }], // mask differs
+    ];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    assert_eq!(result.warps_diverged, 2, "Warps 1 and 3 should diverge");
+    assert_eq!(result.divergences.len(), 2);
+    assert_eq!(result.total_warps, 4);
+}
+
+#[test]
+fn test_multiple_divergence_types_same_warp() {
+    let events_a = vec![vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0,
+        active_mask: 0xFFFFFFFF, value_a: 100,
+    }]];
+
+    let events_b = vec![vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0,
+        active_mask: 0x0000FFFF, value_a: 200,
+    }]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    assert_eq!(result.divergences.len(), 2, "Branch + mask divergence");
+    assert_eq!(result.warps_diverged, 1, "Both in same warp");
+    assert!(result.divergences.iter().any(|d| matches!(d.kind, DivergenceKind::Branch { .. })));
+    assert!(result.divergences.iter().any(|d| matches!(d.kind, DivergenceKind::ActiveMask { .. })));
+}
+
+#[test]
+fn test_trailing_events_trace_a() {
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 },
+        TraceEvent { site_id: 0x3000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 3 },
+    ]];
+
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    assert!(!result.is_identical());
+
+    let extra = result.divergences.iter().find(|d| matches!(d.kind, DivergenceKind::ExtraEvents { .. })).unwrap();
+    match &extra.kind {
+        DivergenceKind::ExtraEvents { count, in_trace_b } => {
+            assert_eq!(*count, 2);
+            assert!(!in_trace_b, "Extra events in trace A");
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn test_trailing_events_trace_b() {
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ]];
+
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 },
+        TraceEvent { site_id: 0x3000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 3 },
+    ]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    assert!(!result.is_identical());
+
+    let extra = result.divergences.iter().find(|d| matches!(d.kind, DivergenceKind::ExtraEvents { .. })).unwrap();
+    match &extra.kind {
+        DivergenceKind::ExtraEvents { count, in_trace_b } => {
+            assert_eq!(*count, 2);
+            assert!(in_trace_b, "Extra events in trace B");
+        }
+        _ => unreachable!(),
+    }
+}
+
+// ============================================================
+// DiffResult API tests
+// ============================================================
+
+#[test]
+fn test_divergences_by_site() {
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 },
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 3 },
+    ]];
+
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 },
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 3 },
+    ]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    let by_site = result.divergences_by_site();
+    assert_eq!(by_site.len(), 2);
+    assert_eq!(by_site[&0x1000].len(), 2);
+    assert_eq!(by_site[&0x2000].len(), 1);
+}
+
+#[test]
+fn test_divergences_by_kind() {
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 },
+    ]];
+
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0x0000FFFF, value_a: 2 },
+    ]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    let by_kind = result.divergences_by_kind();
+    assert_eq!(by_kind["Branch"], 1);
+    assert_eq!(by_kind["ActiveMask"], 1);
+    assert_eq!(by_kind.len(), 2);
+}
+
+// ============================================================
+// Cross-language format verification tests
+// ============================================================
+
+#[test]
+fn test_header_size_matches_160_bytes() {
+    assert_eq!(std::mem::size_of::<TraceFileHeader>(), 160);
+}
+
+#[test]
+fn test_header_field_offsets() {
+    let header = TraceFileHeader {
+        magic: PRLX_MAGIC,
+        version: PRLX_VERSION,
+        flags: 0,
+        kernel_name_hash: 0x1234567890ABCDEF,
+        kernel_name: [0; 64],
+        grid_dim: [1, 1, 1],
+        block_dim: [32, 1, 1],
+        num_warps_per_block: 1,
+        total_warp_slots: 1,
+        events_per_warp: 128,
+        _pad: 0,
+        timestamp: 0xDEADCAFEBABE0000,
+        cuda_arch: 80,
+        history_depth: 0,
+        history_section_offset: 0,
+        sample_rate: 0,
+        snapshot_depth: 0,
+        snapshot_section_offset: 0,
+    };
+    let bytes: &[u8] = bytemuck::bytes_of(&header);
+
+    assert_eq!(&bytes[0..8], &PRLX_MAGIC.to_le_bytes());
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), PRLX_VERSION);
+    assert_eq!(u64::from_le_bytes(bytes[16..24].try_into().unwrap()), 0x1234567890ABCDEF);
+    assert_eq!(&bytes[24..88], &[0u8; 64]);
+    assert_eq!(u32::from_le_bytes(bytes[120..124].try_into().unwrap()), 128);
+    assert_eq!(&bytes[124..128], &[0u8; 4]); // padding before timestamp
+    assert_eq!(u64::from_le_bytes(bytes[128..136].try_into().unwrap()), 0xDEADCAFEBABE0000);
+    assert_eq!(u32::from_le_bytes(bytes[136..140].try_into().unwrap()), 80);
+}
+
+#[test]
+fn test_event_byte_layout() {
+    let event = TraceEvent {
+        site_id: 0xABCD1234,
+        event_type: 2,
+        branch_dir: 1,
+        _reserved: 0,
+        active_mask: 0xFFFF0000,
+        value_a: 0xDEADBEEF,
+    };
+    let bytes: &[u8] = bytemuck::bytes_of(&event);
+    assert_eq!(bytes.len(), 16);
+
+    assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 0xABCD1234);
+    assert_eq!(bytes[4], 2);
+    assert_eq!(bytes[5], 1);
+    assert_eq!(&bytes[6..8], &[0, 0]);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 0xFFFF0000);
+    assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 0xDEADBEEF);
+}
+
+#[test]
+fn test_small_events_per_warp() {
+    let events_per_warp = 128usize;
+    let events = vec![vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0,
+        active_mask: 0xFFFFFFFF, value_a: 42,
+    }]];
+
+    let mut file = NamedTempFile::new().unwrap();
+    let mut header = TraceFileHeader {
+        magic: PRLX_MAGIC,
+        version: PRLX_VERSION,
+        flags: 0,
+        kernel_name_hash: 0x1234567890ABCDEF,
+        kernel_name: [0; 64],
+        grid_dim: [1, 1, 1],
+        block_dim: [32, 1, 1],
+        num_warps_per_block: 1,
+        total_warp_slots: 1,
+        events_per_warp: events_per_warp as u32,
+        _pad: 0,
+        timestamp: 1234567890,
+        cuda_arch: 80,
+        history_depth: 0,
+        history_section_offset: 0,
+        sample_rate: 0,
+        snapshot_depth: 0,
+        snapshot_section_offset: 0,
+    };
+    let name = b"test_kernel";
+    header.kernel_name[..name.len()].copy_from_slice(name);
+    file.write_all(bytemuck::bytes_of(&header)).unwrap();
+
+    let warp_header = WarpBufferHeader {
+        write_idx: 1, overflow_count: 0, num_events: 1, total_event_count: 0,
+    };
+    file.write_all(bytemuck::bytes_of(&warp_header)).unwrap();
+    file.write_all(bytemuck::bytes_of(&events[0][0])).unwrap();
+    let zero_event = TraceEvent {
+        site_id: 0, event_type: 0, branch_dir: 0, _reserved: 0,
+        active_mask: 0, value_a: 0,
+    };
+    for _ in 0..events_per_warp - 1 {
+        file.write_all(bytemuck::bytes_of(&zero_event)).unwrap();
+    }
+    file.flush().unwrap();
+
+    let trace = prlx_diff::parser::TraceFile::open(file.path()).unwrap();
+    assert_eq!(trace.header().events_per_warp, 128);
+    assert_eq!(trace.total_events(), 1);
+    let (wh, evts) = trace.get_warp_data(0).unwrap();
+    assert_eq!(wh.num_events, 1);
+    assert_eq!(evts[0].site_id, 0x1000);
+    assert_eq!(evts[0].value_a, 42);
+}
+
+// ============================================================
+// Ring buffer overflow tests
+// ============================================================
+
+fn create_test_trace_with_overflow(
+    events: &[TraceEvent],
+    overflow_count: u32,
+) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+
+    let mut header = TraceFileHeader {
+        magic: PRLX_MAGIC,
+        version: PRLX_VERSION,
+        flags: 0,
+        kernel_name_hash: 0x1234567890ABCDEF,
+        kernel_name: [0; 64],
+        grid_dim: [1, 1, 1],
+        block_dim: [32, 1, 1],
+        num_warps_per_block: 1,
+        total_warp_slots: 1,
+        events_per_warp: PRLX_EVENTS_PER_WARP as u32,
+        _pad: 0,
+        timestamp: 1234567890,
+        cuda_arch: 80,
+        history_depth: 0,
+        history_section_offset: 0,
+        sample_rate: 0,
+        snapshot_depth: 0,
+        snapshot_section_offset: 0,
+    };
+    let name = b"test_kernel";
+    header.kernel_name[..name.len()].copy_from_slice(name);
+    file.write_all(bytemuck::bytes_of(&header)).unwrap();
+
+    let actual_written = events.len().min(PRLX_EVENTS_PER_WARP);
+    let warp_header = WarpBufferHeader {
+        write_idx: (events.len() as u32) + overflow_count,
+        overflow_count,
+        num_events: actual_written as u32,
+        total_event_count: 0,
+    };
+    file.write_all(bytemuck::bytes_of(&warp_header)).unwrap();
+
+    for event in events.iter().take(PRLX_EVENTS_PER_WARP) {
+        file.write_all(bytemuck::bytes_of(event)).unwrap();
+    }
+    let zero_event = TraceEvent {
+        site_id: 0, event_type: 0, branch_dir: 0, _reserved: 0,
+        active_mask: 0, value_a: 0,
+    };
+    for _ in 0..PRLX_EVENTS_PER_WARP - actual_written {
+        file.write_all(bytemuck::bytes_of(&zero_event)).unwrap();
+    }
+
+    file.flush().unwrap();
+    file
+}
+
+#[test]
+fn test_overflow_count_reported() {
+    let events = vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0,
+        active_mask: 0xFFFFFFFF, value_a: 42,
+    }];
+
+    let file = create_test_trace_with_overflow(&events, 500);
+    let trace = prlx_diff::parser::TraceFile::open(file.path()).unwrap();
+
+    assert_eq!(trace.total_overflows(), 500);
+    assert_eq!(trace.total_events(), 1);
+    let (wh, evts) = trace.get_warp_data(0).unwrap();
+    assert_eq!(wh.overflow_count, 500);
+    assert_eq!(evts.len(), 1);
+}
+
+#[test]
+fn test_overflow_with_full_buffer() {
+    let mut events = Vec::new();
+    for i in 0..PRLX_EVENTS_PER_WARP {
+        events.push(TraceEvent {
+            site_id: i as u32, event_type: 0, branch_dir: 1, _reserved: 0,
+            active_mask: 0xFFFFFFFF, value_a: i as u32,
+        });
+    }
+
+    let file = create_test_trace_with_overflow(&events, 1000);
+    let trace = prlx_diff::parser::TraceFile::open(file.path()).unwrap();
+
+    assert_eq!(trace.total_events(), PRLX_EVENTS_PER_WARP);
+    assert_eq!(trace.total_overflows(), 1000);
+    let (wh, evts) = trace.get_warp_data(0).unwrap();
+    assert_eq!(wh.num_events as usize, PRLX_EVENTS_PER_WARP);
+    assert_eq!(evts.len(), PRLX_EVENTS_PER_WARP);
+    assert_eq!(evts[0].site_id, 0);
+    assert_eq!(evts[PRLX_EVENTS_PER_WARP - 1].site_id, (PRLX_EVENTS_PER_WARP - 1) as u32);
+}
+
+#[test]
+fn test_overflow_diff_identical() {
+    let events = vec![TraceEvent {
+        site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0,
+        active_mask: 0xFFFFFFFF, value_a: 42,
+    }];
+
+    let file_a = create_test_trace_with_overflow(&events, 100);
+    let file_b = create_test_trace_with_overflow(&events, 200);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(file_a.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(file_b.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    assert!(result.is_identical());
+}
+
+// ============================================================
+// Zstd compression tests
+// ============================================================
+
+#[test]
+fn test_compressed_trace_roundtrip() {
+    let events = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 42 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0x0000FFFF, value_a: 99 },
+    ]];
+
+    let uncompressed_file = create_test_trace("test_kernel", &events);
+    let uncompressed_data = std::fs::read(uncompressed_file.path()).unwrap();
+    let header_size = std::mem::size_of::<TraceFileHeader>();
+
+    let mut header: TraceFileHeader = *bytemuck::from_bytes(&uncompressed_data[..header_size]);
+    header.flags |= PRLX_FLAG_COMPRESS;
+
+    let payload = &uncompressed_data[header_size..];
+    let compressed = zstd::encode_all(payload, 3).unwrap();
+
+    let mut compressed_file = NamedTempFile::new().unwrap();
+    compressed_file.write_all(bytemuck::bytes_of(&header)).unwrap();
+    compressed_file.write_all(&compressed).unwrap();
+    compressed_file.flush().unwrap();
+
+    let trace = prlx_diff::parser::TraceFile::open(compressed_file.path()).unwrap();
+    assert_eq!(trace.total_events(), 2);
+    let (_, evts) = trace.get_warp_data(0).unwrap();
+    assert_eq!(evts[0].site_id, 0x1000);
+    assert_eq!(evts[0].value_a, 42);
+    assert_eq!(evts[1].site_id, 0x2000);
+    assert_eq!(evts[1].active_mask, 0x0000FFFF);
+}
+
+#[test]
+fn test_compressed_trace_diff() {
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ]];
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ]];
+
+    let header_size = std::mem::size_of::<TraceFileHeader>();
+
+    let mut make_compressed = |events: &[Vec<TraceEvent>]| -> NamedTempFile {
+        let raw_file = create_test_trace("test_kernel", events);
+        let raw_data = std::fs::read(raw_file.path()).unwrap();
+        let mut header: TraceFileHeader = *bytemuck::from_bytes(&raw_data[..header_size]);
+        header.flags |= PRLX_FLAG_COMPRESS;
+        let compressed = zstd::encode_all(&raw_data[header_size..], 3).unwrap();
+        let mut out = NamedTempFile::new().unwrap();
+        out.write_all(bytemuck::bytes_of(&header)).unwrap();
+        out.write_all(&compressed).unwrap();
+        out.flush().unwrap();
+        out
+    };
+
+    let file_a = make_compressed(&events_a);
+    let file_b = make_compressed(&events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(file_a.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(file_b.path()).unwrap();
+
+    let result = diff_traces(&trace_a, &trace_b, &DiffConfig::default()).unwrap();
+    assert!(!result.is_identical());
+    assert!(result.divergences.iter().any(|d| matches!(d.kind, DivergenceKind::Branch { .. })));
 }

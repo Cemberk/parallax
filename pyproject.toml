@@ -20,6 +20,7 @@ dependencies = []
 
 [project.optional-dependencies]
 triton = ["triton>=3.0"]
+test = ["pytest>=7.0"]
 all = ["triton>=3.0"]
 
 [project.scripts]
@@ -30,6 +31,9 @@ where = ["python"]
 
 [tool.setuptools.package-data]
 prlx = ["data/bin/*", "data/lib/*", "data/include/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
 
 [tool.setuptools_scm]
 fallback_version = "0.1.0.dev0"
