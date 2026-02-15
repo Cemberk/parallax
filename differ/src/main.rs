@@ -90,6 +90,10 @@ struct Args {
     /// Treat TRACE_A and TRACE_B as session directories (multi-kernel pipeline diff)
     #[arg(long)]
     session: bool,
+
+    /// Continue comparing after path divergence (default: stop at first per warp)
+    #[arg(long)]
+    continue_after_path: bool,
 }
 
 fn main() -> Result<()> {
@@ -152,6 +156,7 @@ fn main() -> Result<()> {
         max_divergences: args.max_divergences,
         lookahead_window: args.lookahead,
         force: args.force,
+        continue_after_path: args.continue_after_path,
     };
 
     let result = diff_traces_with_remap(&trace_a, &trace_b, &config, remapper.as_ref())?;
@@ -194,6 +199,7 @@ fn run_session_diff(args: &Args) -> Result<()> {
         max_divergences: args.max_divergences,
         lookahead_window: args.lookahead,
         force: args.force,
+        continue_after_path: args.continue_after_path,
     };
 
     let session_result = diff_session(&session_a, &session_b, &config);

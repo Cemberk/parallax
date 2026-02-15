@@ -196,6 +196,19 @@ def cmd_diff(args):
         site_map = find_site_map(trace_a.parent)
         if site_map:
             print(f"Auto-detected site map: {site_map}")
+            # Staleness check: warn if site map is older than both traces
+            try:
+                map_mtime = site_map.stat().st_mtime
+                a_mtime = trace_a.stat().st_mtime
+                b_mtime = trace_b.stat().st_mtime
+                if map_mtime < min(a_mtime, b_mtime):
+                    print(
+                        "Warning: Site map is older than both traces — "
+                        "it may be stale. Recompile or pass --map explicitly.",
+                        file=sys.stderr,
+                    )
+            except OSError:
+                pass
         else:
             print("Note: No site map found. Divergences will show site IDs only.")
             print("      To see source locations, provide --map prlx-sites.json")
@@ -262,6 +275,8 @@ def cmd_check(args):
         trace_a = Path(tmpdir) / "trace_a.prlx"
         trace_b = Path(tmpdir) / "trace_b.prlx"
 
+        print("Non-determinism check: running the same binary twice and diffing traces.")
+        print("To compare different inputs, use: prlx run + prlx run + prlx diff\n")
         print("=== Run A ===")
         env = os.environ.copy()
         env["PRLX_TRACE"] = str(trace_a)
@@ -499,7 +514,7 @@ Examples:
   # Run a binary with tracing
   prlx run ./my_kernel --output my_trace.prlx
 
-  # Run twice and auto-diff
+  # Run twice and diff (detect non-determinism)
   prlx check ./my_kernel
 
   # Compile with automatic instrumentation
@@ -543,7 +558,10 @@ Examples:
                        help="Arguments to pass to binary")
 
     # check
-    p_check = subparsers.add_parser("check", help="Run twice and auto-diff")
+    p_check = subparsers.add_parser(
+        "check",
+        help="Run binary twice with identical inputs and diff (tests non-determinism)",
+    )
     p_check.add_argument("binary", help="Binary to execute")
     p_check.add_argument("--map",
                          help="Site mapping file (prlx-sites.json)")

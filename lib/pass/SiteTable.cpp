@@ -1,6 +1,7 @@
 #include "SiteTable.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Function.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/FileSystem.h"
 #include <sstream>
@@ -69,6 +70,29 @@ uint32_t SiteTable::getSiteId(const llvm::Instruction* I, uint8_t event_type) {
 
     std::string location_str = oss.str();
     uint32_t site_id = fnv1a_hash(location_str);
+
+    // Detect hash collisions: different location string hashing to same site_id
+    auto existing = site_map_.find(site_id);
+    if (existing != site_map_.end()) {
+        const SiteInfo& prev = sites_[existing->second];
+        std::string prev_loc = prev.location.toString();
+        std::string cur_loc = loc.toString();
+        if (prev_loc != cur_loc || prev.event_type != event_type) {
+            llvm::errs() << "[prlx] WARNING: site_id hash collision 0x"
+                         << llvm::format_hex_no_prefix(site_id, 8)
+                         << " between " << prev_loc
+                         << " and " << cur_loc << "\n";
+            // Rehash with collision counter to resolve
+            uint32_t attempt = 1;
+            do {
+                std::string rehash_str = location_str + ":c" + std::to_string(attempt++);
+                site_id = fnv1a_hash(rehash_str);
+            } while (site_map_.count(site_id));
+        } else {
+            // Same location, same event type — reuse existing site_id
+            return site_id;
+        }
+    }
 
     SiteInfo info;
     info.site_id = site_id;

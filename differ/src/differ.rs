@@ -18,6 +18,8 @@ pub struct DiffConfig {
     pub lookahead_window: usize,
     /// Skip kernel name check (for comparing different kernel variants)
     pub force: bool,
+    /// Continue comparing after a path divergence (default: stop at first path divergence per warp)
+    pub continue_after_path: bool,
 }
 
 impl Default for DiffConfig {
@@ -27,6 +29,7 @@ impl Default for DiffConfig {
             max_divergences: 0, // unlimited
             lookahead_window: 32,
             force: false,
+            continue_after_path: false,
         }
     }
 }
@@ -421,7 +424,10 @@ fn diff_single_warp(
                     }
                 }
                 (None, None) => {
-                    // True path divergence - cannot re-sync
+                    // True path divergence — no re-sync found within lookahead window.
+                    // By default, we stop comparing this warp because everything after
+                    // this point is likely misaligned. Use continue_after_path to skip
+                    // the divergent events and keep looking for a match further ahead.
                     divergences.push(Divergence {
                         warp_idx,
                         event_idx: i_a,
@@ -432,8 +438,13 @@ fn diff_single_warp(
                         },
                         snapshot: None,
                     });
-                    // Stop comparing this warp - paths have truly diverged
-                    break;
+                    if config.continue_after_path {
+                        // Advance both cursors past the mismatched event
+                        i_a += 1;
+                        i_b += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
         }

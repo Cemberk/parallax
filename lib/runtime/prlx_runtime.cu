@@ -61,19 +61,15 @@ __device__ __forceinline__ void __prlx_store_event(TraceEvent* dst, const TraceE
     __prlx_store_16b(dst, reinterpret_cast<const uint32_t*>(&evt));
 }
 
-// Record a branch event
-extern "C" __device__ void __prlx_record_branch(
-    uint32_t site_id,
-    uint32_t condition,
-    uint32_t operand_a
-) {
-    // Only lane 0 of each warp records the event to avoid redundant writes
-    if (__prlx_lane_id() != 0) return;
-
-    if (!__prlx_recording_enabled) return;
+// Claim a trace event slot for the current warp.
+// Returns pointer to the event slot, or nullptr if the event should be skipped
+// (wrong lane, recording disabled, buffer full, sampling skip, or overflow).
+__device__ __forceinline__ TraceEvent* __prlx_claim_slot() {
+    if (__prlx_lane_id() != 0) return nullptr;
+    if (!__prlx_recording_enabled) return nullptr;
 
     TraceBuffer* buf = g_prlx_buffer;
-    if (buf == nullptr) return;
+    if (buf == nullptr) return nullptr;
 
     uint32_t warp = __prlx_warp_id();
 
@@ -84,30 +80,37 @@ extern "C" __device__ void __prlx_record_branch(
     WarpBufferHeader* header = (WarpBufferHeader*)warp_base;
     TraceEvent* events = (TraceEvent*)(warp_base + sizeof(WarpBufferHeader));
 
-    // Sampling: count all events, but only record 1/N (plain write is safe — only lane 0 touches this)
-    uint32_t evt_count = header->total_event_count;
-    header->total_event_count = evt_count + 1;
-    if (__prlx_sample_rate > 1 && (evt_count % __prlx_sample_rate) != 0) return;
+    // Sampling: count all events, but only record 1/N
+    uint32_t evt_count = atomicAdd(&header->total_event_count, 1);
+    if (__prlx_sample_rate > 1 && (evt_count % __prlx_sample_rate) != 0) return nullptr;
 
     uint32_t idx = atomicAdd(&header->write_idx, 1);
     if (idx >= PRLX_EVENTS_PER_WARP) {
         atomicAdd(&header->overflow_count, 1);
-        return;
+        return nullptr;
     }
 
-    // Get the FULL active lane mask - CRITICAL for SIMT divergence detection
-    // Do NOT hash or compress this value (Death Valley 1)
-    uint32_t active_mask = __activemask();
+    return &events[idx];
+}
+
+// Record a branch event
+extern "C" __device__ void __prlx_record_branch(
+    uint32_t site_id,
+    uint32_t condition,
+    uint32_t operand_a
+) {
+    TraceEvent* slot = __prlx_claim_slot();
+    if (!slot) return;
 
     TraceEvent evt;
     evt.site_id = site_id;
     evt.event_type = EVENT_BRANCH;
     evt.branch_dir = (uint8_t)(condition & 1);
     evt._reserved = 0;
-    evt.active_mask = active_mask;
+    evt.active_mask = __activemask();
     evt.value_a = operand_a;
 
-    __prlx_store_event(&events[idx], evt);
+    __prlx_store_event(slot, evt);
 }
 
 // Record a shared memory store event
@@ -116,30 +119,8 @@ extern "C" __device__ void __prlx_record_shmem_store(
     uint32_t address,
     uint32_t value
 ) {
-    if (__prlx_lane_id() != 0) return;
-    if (!__prlx_recording_enabled) return;
-
-    TraceBuffer* buf = g_prlx_buffer;
-    if (buf == nullptr) return;
-
-    uint32_t warp = __prlx_warp_id();
-
-    // Manual offset calculation
-    size_t warp_buffer_size = sizeof(WarpBufferHeader) + PRLX_EVENTS_PER_WARP * sizeof(TraceEvent);
-    char* warp_base = ((char*)buf) + sizeof(TraceFileHeader) + warp * warp_buffer_size;
-    WarpBufferHeader* header = (WarpBufferHeader*)warp_base;
-    TraceEvent* events = (TraceEvent*)(warp_base + sizeof(WarpBufferHeader));
-
-    // Sampling
-    uint32_t evt_count = header->total_event_count;
-    header->total_event_count = evt_count + 1;
-    if (__prlx_sample_rate > 1 && (evt_count % __prlx_sample_rate) != 0) return;
-
-    uint32_t idx = atomicAdd(&header->write_idx, 1);
-    if (idx >= PRLX_EVENTS_PER_WARP) {
-        atomicAdd(&header->overflow_count, 1);
-        return;
-    }
+    TraceEvent* slot = __prlx_claim_slot();
+    if (!slot) return;
 
     TraceEvent evt;
     evt.site_id = site_id;
@@ -149,7 +130,7 @@ extern "C" __device__ void __prlx_record_shmem_store(
     evt.active_mask = __activemask();
     evt.value_a = value;
 
-    __prlx_store_event(&events[idx], evt);
+    __prlx_store_event(slot, evt);
 }
 
 // Record an atomic operation event
@@ -159,30 +140,8 @@ extern "C" __device__ void __prlx_record_atomic(
     uint32_t operand,
     uint32_t result
 ) {
-    if (__prlx_lane_id() != 0) return;
-    if (!__prlx_recording_enabled) return;
-
-    TraceBuffer* buf = g_prlx_buffer;
-    if (buf == nullptr) return;
-
-    uint32_t warp = __prlx_warp_id();
-
-    // Manual offset calculation
-    size_t warp_buffer_size = sizeof(WarpBufferHeader) + PRLX_EVENTS_PER_WARP * sizeof(TraceEvent);
-    char* warp_base = ((char*)buf) + sizeof(TraceFileHeader) + warp * warp_buffer_size;
-    WarpBufferHeader* header = (WarpBufferHeader*)warp_base;
-    TraceEvent* events = (TraceEvent*)(warp_base + sizeof(WarpBufferHeader));
-
-    // Sampling
-    uint32_t evt_count = header->total_event_count;
-    header->total_event_count = evt_count + 1;
-    if (__prlx_sample_rate > 1 && (evt_count % __prlx_sample_rate) != 0) return;
-
-    uint32_t idx = atomicAdd(&header->write_idx, 1);
-    if (idx >= PRLX_EVENTS_PER_WARP) {
-        atomicAdd(&header->overflow_count, 1);
-        return;
-    }
+    TraceEvent* slot = __prlx_claim_slot();
+    if (!slot) return;
 
     TraceEvent evt;
     evt.site_id = site_id;
@@ -192,7 +151,7 @@ extern "C" __device__ void __prlx_record_atomic(
     evt.active_mask = __activemask();
     evt.value_a = operand;
 
-    __prlx_store_event(&events[idx], evt);
+    __prlx_store_event(slot, evt);
 }
 
 // Record a function entry/exit event
@@ -201,30 +160,8 @@ extern "C" __device__ void __prlx_record_func(
     uint8_t  is_entry,
     uint32_t arg0
 ) {
-    if (__prlx_lane_id() != 0) return;
-    if (!__prlx_recording_enabled) return;
-
-    TraceBuffer* buf = g_prlx_buffer;
-    if (buf == nullptr) return;
-
-    uint32_t warp = __prlx_warp_id();
-
-    // Manual offset calculation
-    size_t warp_buffer_size = sizeof(WarpBufferHeader) + PRLX_EVENTS_PER_WARP * sizeof(TraceEvent);
-    char* warp_base = ((char*)buf) + sizeof(TraceFileHeader) + warp * warp_buffer_size;
-    WarpBufferHeader* header = (WarpBufferHeader*)warp_base;
-    TraceEvent* events = (TraceEvent*)(warp_base + sizeof(WarpBufferHeader));
-
-    // Sampling
-    uint32_t evt_count = header->total_event_count;
-    header->total_event_count = evt_count + 1;
-    if (__prlx_sample_rate > 1 && (evt_count % __prlx_sample_rate) != 0) return;
-
-    uint32_t idx = atomicAdd(&header->write_idx, 1);
-    if (idx >= PRLX_EVENTS_PER_WARP) {
-        atomicAdd(&header->overflow_count, 1);
-        return;
-    }
+    TraceEvent* slot = __prlx_claim_slot();
+    if (!slot) return;
 
     TraceEvent evt;
     evt.site_id = site_id;
@@ -234,7 +171,7 @@ extern "C" __device__ void __prlx_record_func(
     evt.active_mask = __activemask();
     evt.value_a = arg0;
 
-    __prlx_store_event(&events[idx], evt);
+    __prlx_store_event(slot, evt);
 }
 
 // Record a value into the per-warp circular history ring buffer (time-travel)

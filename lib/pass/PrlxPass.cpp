@@ -199,7 +199,8 @@ void PrlxPass::instrumentBranch(BranchInst* BI, SiteTable& siteTable, Module& M)
             OperandA = Builder.CreateBitCast(LHS, Type::getInt32Ty(Ctx));
         } else if (LHS->getType()->isDoubleTy()) {
             Value* AsI64 = Builder.CreateBitCast(LHS, Type::getInt64Ty(Ctx));
-            OperandA = Builder.CreateTrunc(AsI64, Type::getInt32Ty(Ctx));
+            Value* Hi32 = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
+            OperandA = Builder.CreateTrunc(Hi32, Type::getInt32Ty(Ctx));
         }
     }
 
@@ -232,13 +233,15 @@ void PrlxPass::instrumentSnapshot(CmpInst* CI, uint32_t site_id,
         if (BitW <= 32) {
             LhsI32 = Builder.CreateZExtOrTrunc(LHS, Type::getInt32Ty(Ctx));
         } else {
-            LhsI32 = Builder.CreateTrunc(LHS, Type::getInt32Ty(Ctx));
+            Value* Hi = Builder.CreateLShr(LHS, ConstantInt::get(LHS->getType(), 32));
+            LhsI32 = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
         }
     } else if (LHS->getType()->isFloatTy()) {
         LhsI32 = Builder.CreateBitCast(LHS, Type::getInt32Ty(Ctx));
     } else if (LHS->getType()->isDoubleTy()) {
         Value* AsI64 = Builder.CreateBitCast(LHS, Type::getInt64Ty(Ctx));
-        LhsI32 = Builder.CreateTrunc(AsI64, Type::getInt32Ty(Ctx));
+        Value* Hi = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
+        LhsI32 = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
     }
 
     Value* RhsI32 = ConstantInt::get(Type::getInt32Ty(Ctx), 0);
@@ -247,13 +250,15 @@ void PrlxPass::instrumentSnapshot(CmpInst* CI, uint32_t site_id,
         if (BitW <= 32) {
             RhsI32 = Builder.CreateZExtOrTrunc(RHS, Type::getInt32Ty(Ctx));
         } else {
-            RhsI32 = Builder.CreateTrunc(RHS, Type::getInt32Ty(Ctx));
+            Value* Hi = Builder.CreateLShr(RHS, ConstantInt::get(RHS->getType(), 32));
+            RhsI32 = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
         }
     } else if (RHS->getType()->isFloatTy()) {
         RhsI32 = Builder.CreateBitCast(RHS, Type::getInt32Ty(Ctx));
     } else if (RHS->getType()->isDoubleTy()) {
         Value* AsI64 = Builder.CreateBitCast(RHS, Type::getInt64Ty(Ctx));
-        RhsI32 = Builder.CreateTrunc(AsI64, Type::getInt32Ty(Ctx));
+        Value* Hi = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
+        RhsI32 = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
     }
 
     uint32_t predicate = CI->getPredicate();
@@ -288,7 +293,8 @@ void PrlxPass::instrumentSharedMemStore(StoreInst* SI, SiteTable& siteTable, Mod
         ValI32 = Builder.CreateBitCast(StoredVal, Type::getInt32Ty(Ctx));
     } else if (StoredVal->getType()->isDoubleTy()) {
         Value* AsI64 = Builder.CreateBitCast(StoredVal, Type::getInt64Ty(Ctx));
-        ValI32 = Builder.CreateTrunc(AsI64, Type::getInt32Ty(Ctx));
+        Value* Hi = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
+        ValI32 = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
     } else {
         // Unsupported type - skip
         return;
@@ -382,7 +388,8 @@ void PrlxPass::instrumentValueCaptures(BranchInst* BI, SiteTable& siteTable, Mod
                     ValI32 = Builder.CreateBitCast(LI, Type::getInt32Ty(Ctx));
                 } else if (LoadTy->isDoubleTy()) {
                     Value* AsI64 = Builder.CreateBitCast(LI, Type::getInt64Ty(Ctx));
-                    ValI32 = Builder.CreateTrunc(AsI64, Type::getInt32Ty(Ctx));
+                    Value* Hi = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
+                    ValI32 = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
                 }
 
                 if (ValI32) {
@@ -441,7 +448,8 @@ void PrlxPass::instrumentPredicatedOps(
             OperandA = Builder.CreateBitCast(LHS, Type::getInt32Ty(Ctx));
         } else if (LHS->getType()->isDoubleTy()) {
             Value* AsI64 = Builder.CreateBitCast(LHS, Type::getInt64Ty(Ctx));
-            OperandA = Builder.CreateTrunc(AsI64, Type::getInt32Ty(Ctx));
+            Value* Hi = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
+            OperandA = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
         }
 
         CallInst* RecordCall = Builder.CreateCall(record_branch_fn_, {
