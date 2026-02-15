@@ -31,6 +31,7 @@ _Static_assert(sizeof(prlx_channel_event_t) == 32, "channel event must be 32 byt
 #define PRLX_EVENT_ATOMIC      2
 #define PRLX_EVENT_FUNC_ENTRY  3
 #define PRLX_EVENT_FUNC_EXIT   4
+#define PRLX_EVENT_GLOBAL_STORE 6
 
 // Max events per warp (matches default PRLX_EVENTS_PER_WARP from trace_format.h)
 #define PRLX_NVBIT_DEFAULT_BUFFER_SIZE 4096

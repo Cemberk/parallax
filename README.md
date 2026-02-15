@@ -84,6 +84,38 @@ for w in trace.warps():
 diff_traces("a.prlx", "b.prlx", history=True)
 ```
 
+### Multi-Kernel Pipelines
+
+Capture and diff entire GPU pipelines (multiple kernel launches):
+
+```c
+// In your code:
+prlx_session_begin(NULL);
+kernel_A<<<grid, block>>>(...);  // prlx_pre/post_launch called automatically
+kernel_B<<<grid, block>>>(...);
+prlx_session_end();
+```
+
+```bash
+# Capture sessions
+PRLX_SESSION=/tmp/session_a ./my_pipeline --param-a
+PRLX_SESSION=/tmp/session_b ./my_pipeline --param-b
+
+# Diff two sessions
+prlx diff /tmp/session_a /tmp/session_b
+
+# Or use the session subcommand:
+prlx session diff /tmp/session_a /tmp/session_b
+
+# Inspect a session manifest:
+prlx session inspect /tmp/session_a
+
+# Capture via CLI wrapper:
+prlx session capture ./my_pipeline -o /tmp/session_a -- --param-a
+```
+
+Unmatched kernel launches between sessions are reported as warnings. Grid/block dimension mismatches are also flagged.
+
 ### TUI
 
 ```bash
@@ -105,6 +137,7 @@ Interactive terminal UI for navigating divergences across warps.
 | `PRLX_FILTER` | _(none)_ | Comma-separated glob patterns for kernel names to instrument |
 | `PRLX_SESSION` | _(none)_ | Directory path for multi-launch session mode |
 | `PRLX_SITES` | `prlx-sites.json` | Output path for site map |
+| `PRLX_INSTRUMENT_STORES` | `0` | Instrument global memory stores (opt-in, produces large traces) |
 | `PRLX_OPT_TIMEOUT` | `120` | Timeout (seconds) for llvm-link/opt in Triton hook |
 
 ## How It Works

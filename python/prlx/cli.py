@@ -177,6 +177,11 @@ def cmd_diff(args):
         print(f"Error: Trace B not found: {trace_b}", file=sys.stderr)
         return 1
 
+    # Auto-detect session mode: if both paths are directories, infer --session
+    session = getattr(args, "session", False)
+    if trace_a.is_dir() and trace_b.is_dir():
+        session = True
+
     differ = _find_lib.find_differ_binary()
     if not differ:
         print(
@@ -233,6 +238,8 @@ def cmd_diff(args):
         cmd.append("--float")
     if hasattr(args, "force") and args.force:
         cmd.append("--force")
+    if session:
+        cmd.append("--session")
 
     return subprocess.call(cmd)
 
@@ -320,6 +327,7 @@ def cmd_check(args):
                 self.tui = getattr(args, "tui", False)
                 self.float = getattr(args, "float", False)
                 self.force = getattr(args, "force", False)
+                self.session = False
 
         return cmd_diff(DiffArgs())
 
@@ -412,6 +420,107 @@ def cmd_compile(args):
 
     finally:
         os.unlink(unified_path)
+
+
+def cmd_session(args):
+    subcmd = args.session_command
+    if not subcmd:
+        print("Usage: prlx session {capture,inspect,diff} ...", file=sys.stderr)
+        return 1
+
+    if subcmd == "capture":
+        return cmd_session_capture(args)
+    elif subcmd == "inspect":
+        return cmd_session_inspect(args)
+    elif subcmd == "diff":
+        return cmd_session_diff(args)
+
+    print(f"Unknown session subcommand: {subcmd}", file=sys.stderr)
+    return 1
+
+
+def cmd_session_capture(args):
+    binary = Path(args.binary)
+
+    if not binary.exists():
+        print(f"Error: Binary not found: {binary}", file=sys.stderr)
+        return 1
+
+    output_dir = Path(args.output) if args.output else Path(f"{binary.stem}_session")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["PRLX_SESSION"] = str(output_dir.resolve())
+
+    cmd = [str(binary)] + (args.binary_args or [])
+    print(f"Running {binary} with session capture to {output_dir}...")
+    result = subprocess.call(cmd, env=env)
+
+    manifest = output_dir / "session.json"
+    if result == 0 and manifest.exists():
+        print(f"Session captured: {output_dir}")
+        import json
+        with open(manifest) as f:
+            launches = json.load(f)
+        print(f"  {len(launches)} kernel launch(es) recorded")
+    elif result == 0:
+        print(f"Warning: Binary exited successfully but no session.json found in {output_dir}",
+              file=sys.stderr)
+
+    return result
+
+
+def cmd_session_inspect(args):
+    import json
+
+    session_dir = Path(args.session_dir)
+    manifest_path = session_dir / "session.json"
+
+    if not manifest_path.exists():
+        print(f"Error: No session.json in {session_dir}", file=sys.stderr)
+        return 1
+
+    with open(manifest_path) as f:
+        launches = json.load(f)
+
+    print(f"Session: {session_dir}")
+    print(f"Launches: {len(launches)}")
+    print()
+
+    # Table header
+    print(f"{'#':<4} {'Kernel':<40} {'Grid':<16} {'Block':<16} {'File'}")
+    print("-" * 100)
+
+    for i, launch in enumerate(launches):
+        grid = "x".join(str(g) for g in launch.get("grid", []))
+        block = "x".join(str(b) for b in launch.get("block", []))
+        kernel = launch.get("kernel", "?")
+        fname = launch.get("file", "?")
+        launch_idx = launch.get("launch", i)
+        print(f"{launch_idx:<4} {kernel:<40} {grid:<16} {block:<16} {fname}")
+
+    return 0
+
+
+def cmd_session_diff(args):
+    """Delegate to cmd_diff with session=True."""
+
+    class DiffArgs:
+        def __init__(self):
+            self.trace_a = args.session_a
+            self.trace_b = args.session_b
+            self.map = getattr(args, "map", None)
+            self.values = getattr(args, "values", False)
+            self.verbose = getattr(args, "verbose", False)
+            self.limit = getattr(args, "limit", None)
+            self.lookahead = getattr(args, "lookahead", None)
+            self.max_shown = getattr(args, "max_shown", 10)
+            self.tui = getattr(args, "tui", False)
+            self.float = getattr(args, "float", False)
+            self.force = getattr(args, "force", False)
+            self.session = True
+
+    return cmd_diff(DiffArgs())
 
 
 def cmd_triton(args):
@@ -511,6 +620,9 @@ Examples:
   # Compare with source location mapping
   prlx diff trace_a.prlx trace_b.prlx --map prlx-sites.json
 
+  # Compare session directories (multi-launch traces)
+  prlx diff session_a/ session_b/ --session
+
   # Run a binary with tracing
   prlx run ./my_kernel --output my_trace.prlx
 
@@ -548,6 +660,8 @@ Examples:
                         help="Display snapshot operands as floats")
     p_diff.add_argument("--force", action="store_true",
                         help="Skip kernel name check (compare different variants)")
+    p_diff.add_argument("--session", action="store_true",
+                        help="Compare session directories (multi-launch traces)")
 
     # run
     p_run = subparsers.add_parser("run",
@@ -596,6 +710,48 @@ Examples:
     p_compile.add_argument("--extra", nargs="*",
                            help="Extra compiler flags")
 
+    # session
+    p_session = subparsers.add_parser(
+        "session", help="Multi-kernel session operations")
+    session_subs = p_session.add_subparsers(dest="session_command",
+                                            help="Session subcommand")
+
+    # session capture
+    p_sess_capture = session_subs.add_parser(
+        "capture", help="Capture a session (run binary with PRLX_SESSION)")
+    p_sess_capture.add_argument("binary", help="Binary to execute")
+    p_sess_capture.add_argument("-o", "--output",
+                                help="Output session directory")
+    p_sess_capture.add_argument("binary_args", nargs="*",
+                                help="Arguments to pass to binary")
+
+    # session inspect
+    p_sess_inspect = session_subs.add_parser(
+        "inspect", help="Inspect a session manifest")
+    p_sess_inspect.add_argument("session_dir",
+                                help="Session directory to inspect")
+
+    # session diff
+    p_sess_diff = session_subs.add_parser(
+        "diff", help="Diff two session directories")
+    p_sess_diff.add_argument("session_a", help="First session directory")
+    p_sess_diff.add_argument("session_b", help="Second session directory")
+    p_sess_diff.add_argument("--map", help="Site mapping file")
+    p_sess_diff.add_argument("-n", "--max-shown", type=int, default=10,
+                             help="Max divergences to display")
+    p_sess_diff.add_argument("--values", action="store_true",
+                             help="Compare operand values")
+    p_sess_diff.add_argument("-v", "--verbose", action="store_true",
+                             help="Verbose output")
+    p_sess_diff.add_argument("-l", "--limit", type=int,
+                             help="Max divergences to collect")
+    p_sess_diff.add_argument("--lookahead", type=int,
+                             help="Lookahead window size")
+    p_sess_diff.add_argument("--float", action="store_true",
+                             help="Display snapshot operands as floats")
+    p_sess_diff.add_argument("--force", action="store_true",
+                             help="Skip kernel name check")
+
     # triton
     p_triton = subparsers.add_parser("triton",
                                      help="Triton/Python integration")
@@ -619,6 +775,7 @@ Examples:
         "compile": cmd_compile,
         "run": cmd_run,
         "check": cmd_check,
+        "session": cmd_session,
         "triton": cmd_triton,
     }
     handler = dispatch.get(args.command)

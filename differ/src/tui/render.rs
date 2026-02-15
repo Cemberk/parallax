@@ -699,6 +699,7 @@ fn event_type_long(t: u8) -> &'static str {
         3 => "Function Entry",
         4 => "Function Exit",
         5 => "Switch",
+        6 => "Global Store",
         _ => "Unknown",
     }
 }

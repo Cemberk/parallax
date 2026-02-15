@@ -120,6 +120,32 @@ extern "C" __device__ __noinline__ void prlx_instr_atomic(
     prlx_push_event(pchannel_dev, &evt);
 }
 
+// Global memory store instrumentation (opt-in via PRLX_INSTRUMENT_STORES=1)
+extern "C" __device__ __noinline__ void prlx_instr_global_store(
+    int pred,
+    uint32_t sass_pc,
+    uint32_t addr,
+    uint32_t value,
+    uint64_t grid_launch_id,
+    uint64_t pchannel_dev
+) {
+    if (!pred) return;
+    if (prlx_lane_id() != 0) return;
+
+    prlx_channel_event_t evt;
+    evt.grid_launch_id = grid_launch_id;
+    evt.warp_id = prlx_compute_warp_id();
+    evt.site_id = sass_pc;
+    evt.event_type = PRLX_EVENT_GLOBAL_STORE;
+    evt.branch_dir = 0;
+    evt._pad = 0;
+    evt.active_mask = __activemask();
+    evt.value_a = value;
+    evt._reserved = 0;
+
+    prlx_push_event(pchannel_dev, &evt);
+}
+
 // Function entry instrumentation (called at first instruction of function)
 extern "C" __device__ __noinline__ void prlx_instr_func_entry(
     int pred,

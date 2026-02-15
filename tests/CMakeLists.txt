@@ -44,3 +44,11 @@ set_target_properties(divergence_test PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
+
+# End-to-end GPU test (requires GPU hardware)
+add_custom_target(test-e2e
+    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_e2e.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running PRLX end-to-end GPU tests"
+    DEPENDS divergence_test
+)

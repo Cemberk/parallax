@@ -72,6 +72,12 @@ extern "C" {
         uint32_t result
     );
 
+    __device__ void __prlx_record_global_store(
+        uint32_t site_id,
+        uint32_t address,
+        uint32_t value
+    );
+
     __device__ void __prlx_record_func(
         uint32_t site_id,
         uint8_t  is_entry,

@@ -38,6 +38,7 @@ EVENT_NAMES = {
     3: "FuncEntry",
     4: "FuncExit",
     5: "Switch",
+    6: "GlobalStore",
 }
 
 

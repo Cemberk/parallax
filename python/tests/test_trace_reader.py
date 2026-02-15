@@ -154,7 +154,8 @@ class TestEventParsing:
         assert EVENT_NAMES[3] == "FuncEntry"
         assert EVENT_NAMES[4] == "FuncExit"
         assert EVENT_NAMES[5] == "Switch"
-        assert len(EVENT_NAMES) == 6
+        assert EVENT_NAMES[6] == "GlobalStore"
+        assert len(EVENT_NAMES) == 7
 
 
 # ============================================================

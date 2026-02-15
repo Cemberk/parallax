@@ -32,6 +32,7 @@ pub const EVENT_ATOMIC: u8 = 2;
 pub const EVENT_FUNC_ENTRY: u8 = 3;
 pub const EVENT_FUNC_EXIT: u8 = 4;
 pub const EVENT_SWITCH: u8 = 5;
+pub const EVENT_GLOBAL_STORE: u8 = 6;
 
 /// Trace file header (160 bytes - MUST match C++ TraceFileHeader)
 ///

@@ -223,6 +223,17 @@ fn run_session_diff(args: &Args) -> Result<()> {
         println!();
     }
 
+    // Print unmatched launches as warnings
+    for name in &session_result.unmatched_a {
+        println!("Warning: Unmatched launch in session A (not in B): {}", name);
+    }
+    for name in &session_result.unmatched_b {
+        println!("Warning: Unmatched launch in session B (not in A): {}", name);
+    }
+    if !session_result.unmatched_a.is_empty() || !session_result.unmatched_b.is_empty() {
+        any_diverged = true;
+    }
+
     if any_diverged {
         std::process::exit(1);
     }

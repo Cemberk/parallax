@@ -141,6 +141,10 @@ void PrlxPass::declareRuntimeFunctions(Module& M) {
     FunctionType* ShMemFnTy = FunctionType::get(VoidTy, {I32Ty, I32Ty, I32Ty}, false);
     record_shmem_store_fn_ = getOrDeclare("__prlx_record_shmem_store", ShMemFnTy);
 
+    // void __prlx_record_global_store(uint32_t site_id, uint32_t address, uint32_t value)
+    FunctionType* GlobStoreFnTy = FunctionType::get(VoidTy, {I32Ty, I32Ty, I32Ty}, false);
+    record_global_store_fn_ = getOrDeclare("__prlx_record_global_store", GlobStoreFnTy);
+
     // void __prlx_record_atomic(uint32_t site_id, uint32_t address, uint32_t operand, uint32_t result)
     FunctionType* AtomicFnTy = FunctionType::get(VoidTy, {I32Ty, I32Ty, I32Ty, I32Ty}, false);
     record_atomic_fn_ = getOrDeclare("__prlx_record_atomic", AtomicFnTy);
@@ -311,6 +315,39 @@ void PrlxPass::instrumentSharedMemStore(StoreInst* SI, SiteTable& siteTable, Mod
     });
 
     // CRITICAL: Mark as convergent (uses __activemask())
+    CI->addFnAttr(Attribute::Convergent);
+}
+
+void PrlxPass::instrumentGlobalMemStore(StoreInst* SI, SiteTable& siteTable, Module& M) {
+    LLVMContext& Ctx = M.getContext();
+    IRBuilder<> Builder(Ctx);
+
+    Value* StoredVal = SI->getValueOperand();
+    Value* Ptr = SI->getPointerOperand();
+    uint32_t site_id = siteTable.getSiteId(SI, EVENT_GLOBAL_STORE);
+
+    Builder.SetInsertPoint(SI);
+
+    Value* AddrInt = Builder.CreatePtrToInt(Ptr, Type::getInt32Ty(Ctx));
+    Value* ValI32;
+    if (StoredVal->getType()->isIntegerTy()) {
+        ValI32 = Builder.CreateZExtOrTrunc(StoredVal, Type::getInt32Ty(Ctx));
+    } else if (StoredVal->getType()->isFloatTy()) {
+        ValI32 = Builder.CreateBitCast(StoredVal, Type::getInt32Ty(Ctx));
+    } else if (StoredVal->getType()->isDoubleTy()) {
+        Value* AsI64 = Builder.CreateBitCast(StoredVal, Type::getInt64Ty(Ctx));
+        Value* Hi = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
+        ValI32 = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
+    } else {
+        return;
+    }
+
+    CallInst* CI = Builder.CreateCall(record_global_store_fn_, {
+        ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
+        AddrInt,
+        ValI32
+    });
+
     CI->addFnAttr(Attribute::Convergent);
 }
 
@@ -493,6 +530,15 @@ PreservedAnalyses PrlxPass::run(Module& M, ModuleAnalysisManager& AM) {
     declareRuntimeFunctions(M);
     declareTraceBufferGlobal(M);
 
+    // Global store instrumentation: opt-in at compile time
+    bool instrument_stores = false;
+    if (const char* env_stores = std::getenv("PRLX_INSTRUMENT_STORES")) {
+        instrument_stores = (std::string(env_stores) == "1");
+    }
+    if (instrument_stores) {
+        errs() << "[prlx] Global store instrumentation ENABLED (PRLX_INSTRUMENT_STORES=1)\n";
+    }
+
     SiteTable siteTable;
 
     unsigned skipped = 0;
@@ -528,6 +574,7 @@ PreservedAnalyses PrlxPass::run(Module& M, ModuleAnalysisManager& AM) {
         // Collect first, then instrument (avoids iterator invalidation)
         std::vector<BranchInst*> branches;
         std::vector<StoreInst*> shmem_stores;
+        std::vector<StoreInst*> global_stores;
         std::vector<AtomicRMWInst*> atomics;
         std::vector<AtomicCmpXchgInst*> cmpxchgs;
         std::vector<CmpInst*> predicates;
@@ -545,8 +592,12 @@ PreservedAnalyses PrlxPass::run(Module& M, ModuleAnalysisManager& AM) {
 
             for (Instruction& I : BB) {
                 if (auto* SI = dyn_cast<StoreInst>(&I)) {
-                    if (SI->getPointerAddressSpace() == 3) {  // Shared memory
+                    unsigned AS = SI->getPointerAddressSpace();
+                    if (AS == 3) {  // Shared memory
                         shmem_stores.push_back(SI);
+                    } else if (instrument_stores && AS != 5) {
+                        // Global memory (addrspace 0 or 1), not local (5)
+                        global_stores.push_back(SI);
                     }
                 }
                 if (auto* AI = dyn_cast<AtomicRMWInst>(&I)) {
@@ -587,6 +638,9 @@ PreservedAnalyses PrlxPass::run(Module& M, ModuleAnalysisManager& AM) {
         instrumentPredicatedOps(predicates, siteTable, M);
         for (auto* SI : shmem_stores) {
             instrumentSharedMemStore(SI, siteTable, M);
+        }
+        for (auto* SI : global_stores) {
+            instrumentGlobalMemStore(SI, siteTable, M);
         }
         for (auto* AI : atomics) {
             instrumentAtomic(AI, siteTable, M);

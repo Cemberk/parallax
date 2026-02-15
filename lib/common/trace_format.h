@@ -36,6 +36,7 @@ extern "C" {
 #define EVENT_FUNC_ENTRY  3
 #define EVENT_FUNC_EXIT   4
 #define EVENT_SWITCH      5
+#define EVENT_GLOBAL_STORE 6
 
 // Trace event structure (16 bytes - full version)
 // V0: Full-size event used during development and detailed debugging

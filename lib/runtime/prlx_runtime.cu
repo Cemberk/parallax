@@ -133,6 +133,26 @@ extern "C" __device__ void __prlx_record_shmem_store(
     __prlx_store_event(slot, evt);
 }
 
+// Record a global memory store event (opt-in via PRLX_INSTRUMENT_STORES=1)
+extern "C" __device__ void __prlx_record_global_store(
+    uint32_t site_id,
+    uint32_t address,
+    uint32_t value
+) {
+    TraceEvent* slot = __prlx_claim_slot();
+    if (!slot) return;
+
+    TraceEvent evt;
+    evt.site_id = site_id;
+    evt.event_type = EVENT_GLOBAL_STORE;
+    evt.branch_dir = 0;
+    evt._reserved = 0;
+    evt.active_mask = __activemask();
+    evt.value_a = value;
+
+    __prlx_store_event(slot, evt);
+}
+
 // Record an atomic operation event
 extern "C" __device__ void __prlx_record_atomic(
     uint32_t site_id,

@@ -33,6 +33,7 @@ static struct {
     uint32_t sample_rate = 1;
     bool enabled = true;
     bool compress = false;
+    bool instrument_stores = false;
 } g_config;
 
 // ---- Global state ----
@@ -75,6 +76,11 @@ static bool is_atomic_opcode(const char* opcode) {
             strncmp(opcode, "ATOMS.", 6) == 0 ||
             strcmp(opcode, "RED") == 0 ||
             strncmp(opcode, "RED.", 4) == 0);
+}
+
+static bool is_global_store_opcode(const char* opcode) {
+    return (strcmp(opcode, "STG") == 0 ||
+            strncmp(opcode, "STG.", 4) == 0);
 }
 
 static bool is_func_exit_opcode(const char* opcode) {
@@ -142,8 +148,16 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
         const char* opcode = instr->getOpcode();
         uint32_t sass_pc = instr->getOffset();
 
+        // Query per-instruction source line info from debug info
+        char* nvbit_file = nullptr;
+        char* nvbit_dir = nullptr;
+        uint32_t nvbit_line = 0;
         const char* filename = "";
         uint32_t line = 0;
+        if (nvbit_get_line_info(ctx, func, sass_pc, &nvbit_file, &nvbit_dir, &nvbit_line)) {
+            if (nvbit_file) filename = nvbit_file;
+            line = nvbit_line;
+        }
 
         uint8_t event_type = 255;
 
@@ -179,6 +193,18 @@ static void instrument_function(CUcontext ctx, CUfunction func) {
 
             // prlx_instr_shmem_store(pred, sass_pc, addr, value, grid_launch_id, pchannel_dev)
             nvbit_insert_call(instr, "prlx_instr_shmem_store", IPOINT_BEFORE);
+            nvbit_add_call_arg_guard_pred_val(instr);
+            nvbit_add_call_arg_const_val32(instr, sass_pc);
+            nvbit_add_call_arg_mref_addr64(instr, 0);
+            nvbit_add_call_arg_const_val32(instr, 0);
+            nvbit_add_call_arg_launch_val64(instr, 0);
+            nvbit_add_call_arg_const_val64(instr, (uint64_t)g_channel_dev);
+        }
+        else if (g_config.instrument_stores && is_global_store_opcode(opcode)) {
+            event_type = PRLX_EVENT_GLOBAL_STORE;
+            g_site_table.register_site(sass_pc, event_type, filename, func_name, line);
+
+            nvbit_insert_call(instr, "prlx_instr_global_store", IPOINT_BEFORE);
             nvbit_add_call_arg_guard_pred_val(instr);
             nvbit_add_call_arg_const_val32(instr, sass_pc);
             nvbit_add_call_arg_mref_addr64(instr, 0);
@@ -231,6 +257,7 @@ void nvbit_at_init() {
     if (const char* v = getenv("PRLX_BUFFER_SIZE")) g_config.buffer_size = atoi(v);
     if (const char* v = getenv("PRLX_SAMPLE_RATE")) g_config.sample_rate = atoi(v);
     if (const char* v = getenv("PRLX_COMPRESS")) g_config.compress = (atoi(v) != 0);
+    if (const char* v = getenv("PRLX_INSTRUMENT_STORES")) g_config.instrument_stores = (atoi(v) != 0);
 
     fprintf(stderr, "[prlx-nvbit] Initialized: trace=%s, buffer=%u, filter='%s'\n",
             g_config.trace_path.c_str(),

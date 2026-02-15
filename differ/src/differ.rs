@@ -481,6 +481,10 @@ fn diff_single_warp(
 /// Result of a session diff (multiple kernel launches)
 pub struct SessionDiffResult {
     pub kernel_results: Vec<(String, u32, Result<DiffResult>)>,
+    /// Kernel launches present in session A but not in session B
+    pub unmatched_a: Vec<String>,
+    /// Kernel launches present in session B but not in session A
+    pub unmatched_b: Vec<String>,
 }
 
 /// Compare two session directories by matching kernel launches
@@ -490,13 +494,30 @@ pub fn diff_session(
     config: &DiffConfig,
 ) -> SessionDiffResult {
     let mut kernel_results = Vec::new();
+    let mut matched_b_indices = std::collections::HashSet::new();
 
     for launch_a in &session_a.launches {
-        let matching_b = session_b.launches.iter().find(|lb| {
+        let matching_b = session_b.launches.iter().enumerate().find(|(_, lb)| {
             lb.kernel == launch_a.kernel && lb.launch == launch_a.launch
         });
 
-        if let Some(launch_b) = matching_b {
+        if let Some((b_idx, launch_b)) = matching_b {
+            matched_b_indices.insert(b_idx);
+
+            // Warn (not error) if grid/block dims differ
+            if launch_a.grid != launch_b.grid {
+                eprintln!(
+                    "Warning: Grid dim mismatch for {} (launch {}): {:?} vs {:?}",
+                    launch_a.kernel, launch_a.launch, launch_a.grid, launch_b.grid
+                );
+            }
+            if launch_a.block != launch_b.block {
+                eprintln!(
+                    "Warning: Block dim mismatch for {} (launch {}): {:?} vs {:?}",
+                    launch_a.kernel, launch_a.launch, launch_a.block, launch_b.block
+                );
+            }
+
             let result = (|| -> Result<DiffResult> {
                 let trace_a = session_a.open_trace(launch_a)?;
                 let trace_b = session_b.open_trace(launch_b)?;
@@ -506,5 +527,31 @@ pub fn diff_session(
         }
     }
 
-    SessionDiffResult { kernel_results }
+    // Detect unmatched launches in A (present in A but not B)
+    let unmatched_a: Vec<String> = session_a
+        .launches
+        .iter()
+        .filter(|la| {
+            !session_b
+                .launches
+                .iter()
+                .any(|lb| lb.kernel == la.kernel && lb.launch == la.launch)
+        })
+        .map(|la| format!("{} (launch {})", la.kernel, la.launch))
+        .collect();
+
+    // Detect unmatched launches in B (present in B but not A)
+    let unmatched_b: Vec<String> = session_b
+        .launches
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !matched_b_indices.contains(idx))
+        .map(|(_, lb)| format!("{} (launch {})", lb.kernel, lb.launch))
+        .collect();
+
+    SessionDiffResult {
+        kernel_results,
+        unmatched_a,
+        unmatched_b,
+    }
 }

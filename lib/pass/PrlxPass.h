@@ -28,6 +28,7 @@ private:
     void declareTraceBufferGlobal(llvm::Module& M);
     void instrumentBranch(llvm::BranchInst* BI, SiteTable& siteTable, llvm::Module& M);
     void instrumentSharedMemStore(llvm::StoreInst* SI, SiteTable& siteTable, llvm::Module& M);
+    void instrumentGlobalMemStore(llvm::StoreInst* SI, SiteTable& siteTable, llvm::Module& M);
     void instrumentAtomic(llvm::AtomicRMWInst* AI, SiteTable& siteTable, llvm::Module& M);
     void instrumentCmpXchg(llvm::AtomicCmpXchgInst* CI, SiteTable& siteTable, llvm::Module& M);
     void instrumentValueCaptures(llvm::BranchInst* BI, SiteTable& siteTable, llvm::Module& M);
@@ -44,6 +45,7 @@ private:
     // Runtime function declarations (cached)
     llvm::Function* record_branch_fn_ = nullptr;
     llvm::Function* record_shmem_store_fn_ = nullptr;
+    llvm::Function* record_global_store_fn_ = nullptr;
     llvm::Function* record_atomic_fn_ = nullptr;
     llvm::Function* record_func_fn_ = nullptr;
     llvm::Function* record_value_fn_ = nullptr;

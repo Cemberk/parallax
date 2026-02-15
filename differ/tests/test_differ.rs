@@ -1404,3 +1404,212 @@ fn test_compressed_trace_diff() {
     assert!(!result.is_identical());
     assert!(result.divergences.iter().any(|d| matches!(d.kind, DivergenceKind::Branch { .. })));
 }
+
+// ============================================================
+// Session diff tests
+// ============================================================
+
+use prlx_diff::differ::diff_session;
+use prlx_diff::parser::{SessionManifest, SessionLaunch};
+
+/// Helper: create a session directory with per-kernel trace files + session.json manifest.
+/// `launches` is a slice of (kernel_name, launch_index, events_per_warp_vec).
+fn create_test_session(
+    launches: &[(&str, u32, &[Vec<TraceEvent>])],
+) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    let mut manifest_entries = Vec::new();
+
+    for (kernel, launch_idx, events) in launches {
+        let filename = format!("{}_{}.prlx", kernel, launch_idx);
+        let trace_path = dir.path().join(&filename);
+
+        // Write trace file
+        let tmp = create_test_trace(kernel, events);
+        std::fs::copy(tmp.path(), &trace_path).unwrap();
+
+        // Determine grid/block from the trace
+        manifest_entries.push(serde_json::json!({
+            "kernel": kernel,
+            "launch": launch_idx,
+            "file": filename,
+            "grid": [1, 1, 1],
+            "block": [32, 1, 1],
+        }));
+    }
+
+    let manifest_path = dir.path().join("session.json");
+    let json = serde_json::to_string_pretty(&manifest_entries).unwrap();
+    std::fs::write(&manifest_path, json).unwrap();
+
+    dir
+}
+
+#[test]
+fn test_session_identical() {
+    let events = vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ];
+
+    let session_a = create_test_session(&[
+        ("scale_kernel", 0, &[events.clone()]),
+        ("threshold_kernel", 1, &[events.clone()]),
+    ]);
+    let session_b = create_test_session(&[
+        ("scale_kernel", 0, &[events.clone()]),
+        ("threshold_kernel", 1, &[events.clone()]),
+    ]);
+
+    let manifest_a = SessionManifest::load(session_a.path()).unwrap();
+    let manifest_b = SessionManifest::load(session_b.path()).unwrap();
+
+    let config = DiffConfig::default();
+    let result = diff_session(&manifest_a, &manifest_b, &config);
+
+    assert_eq!(result.kernel_results.len(), 2);
+    assert!(result.unmatched_a.is_empty());
+    assert!(result.unmatched_b.is_empty());
+    for (_, _, diff_result) in &result.kernel_results {
+        assert!(diff_result.as_ref().unwrap().is_identical());
+    }
+}
+
+#[test]
+fn test_session_branch_divergence() {
+    let events_a = vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ];
+    let events_b = vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ];
+
+    let session_a = create_test_session(&[
+        ("my_kernel", 0, &[events_a]),
+    ]);
+    let session_b = create_test_session(&[
+        ("my_kernel", 0, &[events_b]),
+    ]);
+
+    let manifest_a = SessionManifest::load(session_a.path()).unwrap();
+    let manifest_b = SessionManifest::load(session_b.path()).unwrap();
+
+    let result = diff_session(&manifest_a, &manifest_b, &DiffConfig::default());
+
+    assert_eq!(result.kernel_results.len(), 1);
+    let (name, idx, diff_result) = &result.kernel_results[0];
+    assert_eq!(name, "my_kernel");
+    assert_eq!(*idx, 0);
+    let diff = diff_result.as_ref().unwrap();
+    assert!(!diff.is_identical());
+    assert!(diff.divergences.iter().any(|d| matches!(d.kind, DivergenceKind::Branch { .. })));
+}
+
+#[test]
+fn test_session_unmatched_launch() {
+    let events = vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ];
+
+    // Session A has kernel_c that B doesn't
+    let session_a = create_test_session(&[
+        ("kernel_a", 0, &[events.clone()]),
+        ("kernel_c", 1, &[events.clone()]),
+    ]);
+    let session_b = create_test_session(&[
+        ("kernel_a", 0, &[events.clone()]),
+    ]);
+
+    let manifest_a = SessionManifest::load(session_a.path()).unwrap();
+    let manifest_b = SessionManifest::load(session_b.path()).unwrap();
+
+    let result = diff_session(&manifest_a, &manifest_b, &DiffConfig::default());
+
+    assert_eq!(result.kernel_results.len(), 1); // Only kernel_a matched
+    assert_eq!(result.unmatched_a.len(), 1);
+    assert!(result.unmatched_a[0].contains("kernel_c"));
+    assert!(result.unmatched_b.is_empty());
+}
+
+#[test]
+fn test_session_different_launch_counts() {
+    let events = vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ];
+
+    // A has 3 launches, B has 2 — launch 2 is unmatched in A
+    let session_a = create_test_session(&[
+        ("kern", 0, &[events.clone()]),
+        ("kern", 1, &[events.clone()]),
+        ("kern", 2, &[events.clone()]),
+    ]);
+    let session_b = create_test_session(&[
+        ("kern", 0, &[events.clone()]),
+        ("kern", 1, &[events.clone()]),
+    ]);
+
+    let manifest_a = SessionManifest::load(session_a.path()).unwrap();
+    let manifest_b = SessionManifest::load(session_b.path()).unwrap();
+
+    let result = diff_session(&manifest_a, &manifest_b, &DiffConfig::default());
+
+    assert_eq!(result.kernel_results.len(), 2);
+    assert_eq!(result.unmatched_a.len(), 1);
+    assert!(result.unmatched_a[0].contains("kern"));
+    assert!(result.unmatched_a[0].contains("launch 2"));
+    assert!(result.unmatched_b.is_empty());
+}
+
+#[test]
+fn test_session_manifest_parse() {
+    let events = vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 42 },
+    ];
+
+    let session = create_test_session(&[
+        ("scale_kernel", 0, &[events.clone()]),
+        ("reduce_kernel", 1, &[events.clone()]),
+    ]);
+
+    let manifest = SessionManifest::load(session.path()).unwrap();
+
+    assert_eq!(manifest.launches.len(), 2);
+    assert_eq!(manifest.launches[0].kernel, "scale_kernel");
+    assert_eq!(manifest.launches[0].launch, 0);
+    assert_eq!(manifest.launches[1].kernel, "reduce_kernel");
+    assert_eq!(manifest.launches[1].launch, 1);
+    assert_eq!(manifest.launches[0].grid, [1, 1, 1]);
+    assert_eq!(manifest.launches[0].block, [32, 1, 1]);
+}
+
+#[test]
+fn test_session_missing_trace_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // Write manifest referencing a file that doesn't exist
+    let manifest_json = serde_json::json!([{
+        "kernel": "missing_kernel",
+        "launch": 0,
+        "file": "nonexistent.prlx",
+        "grid": [1, 1, 1],
+        "block": [32, 1, 1],
+    }]);
+    let manifest_path = dir.path().join("session.json");
+    std::fs::write(&manifest_path, serde_json::to_string(&manifest_json).unwrap()).unwrap();
+
+    // Create a second valid session to diff against
+    let events = vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+    ];
+    let session_b = create_test_session(&[("missing_kernel", 0, &[events])]);
+
+    let manifest_a = SessionManifest::load(dir.path()).unwrap();
+    let manifest_b = SessionManifest::load(session_b.path()).unwrap();
+
+    let result = diff_session(&manifest_a, &manifest_b, &DiffConfig::default());
+
+    // The matching launch should produce an error (file not found)
+    assert_eq!(result.kernel_results.len(), 1);
+    let (_, _, diff_result) = &result.kernel_results[0];
+    assert!(diff_result.is_err(), "Should error when trace file is missing");
+}

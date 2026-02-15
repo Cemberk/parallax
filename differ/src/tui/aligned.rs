@@ -72,6 +72,7 @@ fn event_type_str(t: u8) -> &'static str {
         3 => "FEN",
         4 => "FEX",
         5 => "SWT",
+        6 => "GLB",
         _ => "???",
     }
 }
