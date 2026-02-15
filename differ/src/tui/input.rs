@@ -23,6 +23,7 @@ pub enum Action {
     WarpJumpChar(char),
     WarpJumpConfirm,
     WarpJumpCancel,
+    ToggleSource,
     None,
 }
 
@@ -58,6 +59,7 @@ fn map_normal_key(key: KeyEvent) -> Action {
         KeyCode::Char('/') => Action::StartWarpJump,
         KeyCode::Char(']') => Action::NextWarp,
         KeyCode::Char('[') => Action::PrevWarp,
+        KeyCode::Char('s') => Action::ToggleSource,
         _ => Action::None,
     }
 }

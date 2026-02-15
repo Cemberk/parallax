@@ -1,21 +1,48 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(prlx LANGUAGES CXX CUDA)
+# GPU backend options (set before project() so languages are configured correctly)
+option(PRLX_ENABLE_CUDA "Build CUDA runtime" ON)
+option(PRLX_ENABLE_HIP "Build HIP/ROCm runtime" OFF)
+
+# Configure project languages based on enabled backends
+set(_PRLX_LANGUAGES CXX)
+if(PRLX_ENABLE_CUDA)
+    list(APPEND _PRLX_LANGUAGES CUDA)
+endif()
+
+project(prlx LANGUAGES ${_PRLX_LANGUAGES})
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Configurable CUDA architectures
-# SM_70=Volta/V100, SM_80=Ampere/A100, SM_90=Hopper/H100, SM_120=Blackwell/50xx
-set(PRLX_CUDA_ARCHITECTURES "70;80;90" CACHE STRING "CUDA architectures to build for")
+if(PRLX_ENABLE_CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+    # Configurable CUDA architectures
+    # SM_70=Volta/V100, SM_80=Ampere/A100, SM_90=Hopper/H100, SM_120=Blackwell/50xx
+    set(PRLX_CUDA_ARCHITECTURES "70;80;90" CACHE STRING "CUDA architectures to build for")
+endif()
 
 # Export compile commands for editor integration
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Find CUDA
-find_package(CUDAToolkit REQUIRED)
+# Find CUDA (when enabled)
+if(PRLX_ENABLE_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
+
+# Find HIP/ROCm (when enabled)
+if(PRLX_ENABLE_HIP)
+    list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
+    find_package(hip QUIET)
+    if(hip_FOUND)
+        message(STATUS "Found HIP: ${hip_VERSION}")
+    else()
+        message(WARNING "HIP not found. HIP runtime will not be built.")
+        set(PRLX_ENABLE_HIP OFF)
+    endif()
+endif()
 
 # Workaround for missing zstd CMake config
 # LLVM was built with zstd but the development package may not be installed

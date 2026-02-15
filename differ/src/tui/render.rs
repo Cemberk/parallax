@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use super::aligned::{event_type_short, AlignedRow, EventDisplay, RowDivergence};
 use super::app::{App, FocusPane, InputMode};
+use super::source_cache::SourceSnippet;
 use crate::differ::SnapshotContext;
 use crate::site_map::SiteMap;
 use crate::trace_format::HistoryEntry;
@@ -24,12 +25,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Vertical split: event panes | detail pane | status bar.
+    let source_extra: u16 = if app.source_view_enabled { 12 } else { 0 };
     let detail_height = if app.aligned.has_snapshot() {
-        24  // Extra room for per-lane operand table
+        24 + source_extra  // Extra room for per-lane operand table
     } else if app.aligned.has_history() {
-        18
+        18 + source_extra
     } else {
-        10
+        10 + source_extra
     };
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -273,6 +275,37 @@ fn draw_detail_pane(frame: &mut Frame, app: &mut App, area: Rect) {
         let (hist_a, hist_b) = app.aligned.get_history(warp_idx);
         let site_map = app.aligned.site_map.as_ref();
         format_history_lines(&mut content, &hist_a, &hist_b, site_map);
+    }
+
+    // Phase 4: append source view when enabled
+    if app.source_view_enabled && has_divergences {
+        // Get the site_id from the selected row
+        let site_id = {
+            let view = app.aligned.warp_view(warp_idx);
+            view.rows.get(selected).and_then(|row| {
+                row.event_a
+                    .as_ref()
+                    .or(row.event_b.as_ref())
+                    .map(|e| e.site_id)
+            })
+        };
+        if let Some(sid) = site_id {
+            // Look up the SourceLocation from the site_map
+            let loc_info = app.aligned.site_map.as_ref().and_then(|sm| sm.get(sid));
+            if let Some(loc) = loc_info {
+                let filename = loc.filename.clone();
+                let line = loc.line;
+                let col = loc.column;
+                let snippet = app.source_cache.get_snippet(&filename, line, 5);
+                format_source_lines(&mut content, snippet, &filename, col);
+            } else {
+                content.push(Line::from(""));
+                content.push(Line::from(Span::styled(
+                    "  [source: no site mapping available]",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
     }
 
     let block = Block::default()
@@ -628,6 +661,67 @@ fn format_snapshot_lines(lines: &mut Vec<Line<'static>>, snap: &SnapshotContext,
     }
 }
 
+/// Append source code snippet lines to the detail content.
+fn format_source_lines(
+    lines: &mut Vec<Line<'static>>,
+    snippet: Option<SourceSnippet>,
+    filename: &str,
+    _column: u32,
+) {
+    lines.push(Line::from(""));
+
+    // Extract just the filename portion for the header
+    let display_name = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(filename);
+
+    lines.push(Line::from(vec![
+        Span::styled("  Source: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(display_name.to_string(), Style::default().fg(Color::Green)),
+    ]));
+
+    match snippet {
+        Some(snip) => {
+            for (line_no, content) in &snip.lines {
+                let is_target = *line_no == snip.target_line;
+                let marker = if is_target { ">" } else { " " };
+                let line_num_str = format!("  {} {:>4} ", marker, line_no);
+
+                if is_target {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            line_num_str,
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            content.clone(),
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            line_num_str,
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(
+                            content.clone(),
+                            Style::default().fg(Color::White),
+                        ),
+                    ]));
+                }
+            }
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "  [source: file not found]",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+}
+
 fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let line = match app.input_mode {
         InputMode::WarpJump => {
@@ -675,9 +769,9 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(" | ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     if app.aligned.has_history() {
-                        "[n]ext [N]prev [/]warp [q]uit [hist] "
+                        "[n]ext [N]prev [/]warp [s]ource [q]uit [hist] "
                     } else {
-                        "[n]ext [N]prev [/]warp [q]uit "
+                        "[n]ext [N]prev [/]warp [s]ource [q]uit "
                     },
                     Style::default().fg(Color::DarkGray),
                 ),

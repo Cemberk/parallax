@@ -12,12 +12,17 @@
 
 namespace prlx {
 
+enum class GPUTarget { None, NVPTX, AMDGPU };
+
 class PrlxPass : public llvm::PassInfoMixin<PrlxPass> {
 public:
     llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager& AM);
 
 private:
     bool isNVPTXModule(const llvm::Module& M) const;
+    bool isAMDGPUModule(const llvm::Module& M) const;
+    bool isGPUModule(const llvm::Module& M) const;
+    GPUTarget getGPUTarget(const llvm::Module& M) const;
     bool isDeviceFunction(const llvm::Function& F) const;
     bool matchesFilter(const llvm::Function& F) const;
 
@@ -50,6 +55,9 @@ private:
     llvm::Function* record_func_fn_ = nullptr;
     llvm::Function* record_value_fn_ = nullptr;
     llvm::Function* record_snapshot_fn_ = nullptr;
+
+    // GPU target detected for the current module
+    GPUTarget target_ = GPUTarget::None;
 
     // Selective instrumentation: function name filters
     // Empty = instrument everything (default)

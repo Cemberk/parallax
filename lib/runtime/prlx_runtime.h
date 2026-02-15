@@ -2,7 +2,15 @@
 #define PRLX_RUNTIME_H
 
 #include "../common/trace_format.h"
-#include <cuda_runtime.h>
+
+// Platform detection: HIP/ROCm vs CUDA
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIP_PLATFORM_HCC__)
+  #include <hip/hip_runtime.h>
+  #define PRLX_GPU_PLATFORM_AMD 1
+#else
+  #include <cuda_runtime.h>
+  #define PRLX_GPU_PLATFORM_NVIDIA 1
+#endif
 
 // Per-warp buffer structure (in global memory)
 // Needs to be visible to both host and device code
@@ -18,8 +26,8 @@ typedef struct {
     WarpBuffer warps[];  // Flexible array member
 } TraceBuffer;
 
-#ifdef __CUDACC__
-// Compiling with nvcc - declare both device and host APIs
+#if defined(__CUDACC__) || defined(__HIP__)
+// Compiling with nvcc or hipcc - declare both device and host APIs
 
 // Global device pointer to trace buffer (set by host via cudaMemcpyToSymbol)
 extern __device__ TraceBuffer* g_prlx_buffer;
@@ -119,7 +127,7 @@ extern "C" {
 #else
 // Compiling with regular C++ compiler - host-side only
 
-extern __device__ TraceBuffer* g_prlx_buffer;
+extern TraceBuffer* g_prlx_buffer;
 
 #ifdef __cplusplus
 extern "C" {
@@ -136,6 +144,6 @@ void prlx_session_end(void);
 }
 #endif
 
-#endif // __CUDACC__
+#endif // __CUDACC__ || __HIP__
 
 #endif // PRLX_RUNTIME_H

@@ -1613,3 +1613,354 @@ fn test_session_missing_trace_file() {
     let (_, _, diff_result) = &result.kernel_results[0];
     assert!(diff_result.is_err(), "Should error when trace file is missing");
 }
+
+// ============================================================
+// JSON output tests
+// ============================================================
+
+use prlx_diff::json_output::format_json_report;
+use prlx_diff::differ::{Divergence, DiffResult};
+
+/// Helper: build a DiffResult manually from a list of divergences.
+fn make_diff_result(divergences: Vec<Divergence>, total_warps: usize) -> DiffResult {
+    let warps_diverged = divergences
+        .iter()
+        .map(|d| d.warp_idx)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    DiffResult {
+        divergences,
+        total_warps,
+        total_events_a: 10,
+        total_events_b: 10,
+        warps_compared: total_warps,
+        warps_diverged,
+    }
+}
+
+#[test]
+fn test_json_output_identical() {
+    let result = make_diff_result(vec![], 4);
+    let report = format_json_report(&result, None, None, false);
+
+    assert!(report.passed, "No divergences should mean passed=true");
+    assert_eq!(report.status, "identical");
+    assert_eq!(report.total_divergences, 0);
+    assert_eq!(report.counted_divergences, 0);
+    assert_eq!(report.warps_compared, 4);
+    assert_eq!(report.warps_diverged, 0);
+    assert!(report.divergences.is_empty());
+    assert_eq!(report.threshold, Some(0));
+
+    // Verify it serializes to valid JSON
+    let json_str = serde_json::to_string(&report).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(parsed["status"], "identical");
+    assert_eq!(parsed["passed"], true);
+}
+
+#[test]
+fn test_json_output_diverged() {
+    let divergences = vec![
+        Divergence {
+            warp_idx: 0,
+            event_idx: 1,
+            site_id: 0x1000,
+            kind: DivergenceKind::Branch { dir_a: 0, dir_b: 1 },
+            snapshot: None,
+        },
+        Divergence {
+            warp_idx: 1,
+            event_idx: 0,
+            site_id: 0x2000,
+            kind: DivergenceKind::ActiveMask { mask_a: 0xFFFFFFFF, mask_b: 0x0000FFFF },
+            snapshot: None,
+        },
+    ];
+    let result = make_diff_result(divergences, 4);
+    let report = format_json_report(&result, None, None, false);
+
+    assert!(!report.passed, "Divergences with no threshold should mean passed=false");
+    assert_eq!(report.status, "diverged");
+    assert_eq!(report.total_divergences, 2);
+    assert_eq!(report.counted_divergences, 2);
+    assert_eq!(report.warps_diverged, 2);
+    assert_eq!(report.divergences.len(), 2);
+    assert_eq!(report.threshold, Some(0));
+
+    // Check individual divergence entries
+    assert_eq!(report.divergences[0].warp_idx, 0);
+    assert_eq!(report.divergences[0].site_id, "0x00001000");
+    assert_eq!(report.divergences[0].kind, "Branch");
+    assert_eq!(report.divergences[1].kind, "ActiveMask");
+
+    // Verify breakdown
+    assert_eq!(report.divergence_breakdown["Branch"], 1);
+    assert_eq!(report.divergence_breakdown["ActiveMask"], 1);
+
+    // Verify serialization
+    let json_str = serde_json::to_string(&report).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(parsed["passed"], false);
+    assert_eq!(parsed["status"], "diverged");
+}
+
+#[test]
+fn test_json_max_allowed_divergences() {
+    let divergences = vec![
+        Divergence {
+            warp_idx: 0,
+            event_idx: 0,
+            site_id: 0x1000,
+            kind: DivergenceKind::Branch { dir_a: 0, dir_b: 1 },
+            snapshot: None,
+        },
+        Divergence {
+            warp_idx: 0,
+            event_idx: 1,
+            site_id: 0x2000,
+            kind: DivergenceKind::Branch { dir_a: 1, dir_b: 0 },
+            snapshot: None,
+        },
+        Divergence {
+            warp_idx: 1,
+            event_idx: 0,
+            site_id: 0x3000,
+            kind: DivergenceKind::ActiveMask { mask_a: 0xFFFFFFFF, mask_b: 0x00FF00FF },
+            snapshot: None,
+        },
+    ];
+    let result = make_diff_result(divergences, 4);
+
+    // threshold=5, counted=3 -> passed=true
+    let report = format_json_report(&result, None, Some(5), false);
+    assert!(report.passed, "3 divergences <= threshold 5 should pass");
+    assert_eq!(report.counted_divergences, 3);
+    assert_eq!(report.total_divergences, 3);
+    assert_eq!(report.threshold, Some(5));
+    assert_eq!(report.status, "diverged"); // status reflects actual state, not threshold
+
+    // threshold=2, counted=3 -> passed=false
+    let report_fail = format_json_report(&result, None, Some(2), false);
+    assert!(!report_fail.passed, "3 divergences > threshold 2 should fail");
+
+    // threshold=3, counted=3 -> passed=true (<=, not <)
+    let report_exact = format_json_report(&result, None, Some(3), false);
+    assert!(report_exact.passed, "3 divergences <= threshold 3 should pass (boundary)");
+}
+
+#[test]
+fn test_json_ignore_active_mask() {
+    // Create result with ONLY ActiveMask divergences
+    let divergences = vec![
+        Divergence {
+            warp_idx: 0,
+            event_idx: 0,
+            site_id: 0x1000,
+            kind: DivergenceKind::ActiveMask { mask_a: 0xFFFFFFFF, mask_b: 0x0000FFFF },
+            snapshot: None,
+        },
+        Divergence {
+            warp_idx: 1,
+            event_idx: 0,
+            site_id: 0x2000,
+            kind: DivergenceKind::ActiveMask { mask_a: 0xFF00FF00, mask_b: 0x00FF00FF },
+            snapshot: None,
+        },
+    ];
+    let result = make_diff_result(divergences, 4);
+
+    // With ignore_active_mask=true and no threshold -> counted=0, passed=true
+    let report = format_json_report(&result, None, None, true);
+    assert!(report.passed, "Only ActiveMask divergences with ignore_active_mask should pass");
+    assert_eq!(report.total_divergences, 2, "total_divergences should still count all");
+    assert_eq!(report.counted_divergences, 0, "counted_divergences should exclude ActiveMask");
+    assert_eq!(report.status, "diverged", "status reflects raw state before filtering");
+
+    // All divergences should still appear in the output list
+    assert_eq!(report.divergences.len(), 2);
+
+    // Now test mixed divergences: 1 Branch + 2 ActiveMask, ignore_active_mask=true
+    let mixed_divergences = vec![
+        Divergence {
+            warp_idx: 0,
+            event_idx: 0,
+            site_id: 0x1000,
+            kind: DivergenceKind::Branch { dir_a: 0, dir_b: 1 },
+            snapshot: None,
+        },
+        Divergence {
+            warp_idx: 0,
+            event_idx: 1,
+            site_id: 0x2000,
+            kind: DivergenceKind::ActiveMask { mask_a: 0xFFFFFFFF, mask_b: 0x0000FFFF },
+            snapshot: None,
+        },
+        Divergence {
+            warp_idx: 1,
+            event_idx: 0,
+            site_id: 0x3000,
+            kind: DivergenceKind::ActiveMask { mask_a: 0xFF00FF00, mask_b: 0x00FF00FF },
+            snapshot: None,
+        },
+    ];
+    let mixed_result = make_diff_result(mixed_divergences, 4);
+
+    // ignore_active_mask=true, no threshold -> counted=1 (only the Branch), passed=false
+    let mixed_report = format_json_report(&mixed_result, None, None, true);
+    assert!(!mixed_report.passed, "Branch divergence should still cause failure");
+    assert_eq!(mixed_report.counted_divergences, 1);
+    assert_eq!(mixed_report.total_divergences, 3);
+
+    // ignore_active_mask=true, threshold=1 -> counted=1 <= 1, passed=true
+    let mixed_report_threshold = format_json_report(&mixed_result, None, Some(1), true);
+    assert!(mixed_report_threshold.passed, "1 counted divergence <= threshold 1 should pass");
+}
+
+// ============================================================
+// Flamegraph export tests
+// ============================================================
+
+use prlx_diff::flamegraph::export_flamegraph;
+
+#[test]
+fn test_flamegraph_export_basic() {
+    // Create two traces with branch divergence
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 2 },
+    ]];
+
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 1 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0x0000FFFF, value_a: 2 },
+    ]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let config = DiffConfig::default();
+    let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
+    assert!(!result.is_identical(), "Precondition: traces should diverge");
+
+    // Export flamegraph to a temp file
+    let output_file = NamedTempFile::new().unwrap();
+    let output_path = output_file.path().to_path_buf();
+    export_flamegraph(&trace_a, &trace_b, &result, None, &output_path).unwrap();
+
+    // Read the output and verify it is valid JSON with "traceEvents" key
+    let content = std::fs::read_to_string(&output_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert!(parsed.is_object(), "Output should be a JSON object");
+    assert!(parsed.get("traceEvents").is_some(), "Should have traceEvents key");
+
+    let trace_events = parsed["traceEvents"].as_array().unwrap();
+    assert!(!trace_events.is_empty(), "Should have at least one trace event");
+
+    // Verify metadata event exists (process_name)
+    let metadata_events: Vec<_> = trace_events
+        .iter()
+        .filter(|e| e["ph"] == "M")
+        .collect();
+    assert!(!metadata_events.is_empty(), "Should have metadata events");
+
+    // Verify duration events exist for divergences (ph == "X")
+    let duration_events: Vec<_> = trace_events
+        .iter()
+        .filter(|e| e["ph"] == "X")
+        .collect();
+    assert!(!duration_events.is_empty(), "Should have duration events for divergences");
+
+    // Each duration event should have required fields
+    for evt in &duration_events {
+        assert!(evt.get("name").is_some(), "Duration event should have name");
+        assert!(evt.get("cat").is_some(), "Duration event should have category");
+        assert!(evt.get("ts").is_some(), "Duration event should have timestamp");
+        assert!(evt.get("dur").is_some(), "Duration event should have duration");
+        assert!(evt.get("pid").is_some(), "Duration event should have pid (block)");
+        assert!(evt.get("tid").is_some(), "Duration event should have tid (warp)");
+        assert!(evt.get("args").is_some(), "Duration event should have args");
+    }
+
+    // Verify counter events exist (ph == "C")
+    let counter_events: Vec<_> = trace_events
+        .iter()
+        .filter(|e| e["ph"] == "C")
+        .collect();
+    assert!(!counter_events.is_empty(), "Should have counter events for heatmap");
+
+    // Verify event names contain divergence kind info
+    let all_names: Vec<String> = duration_events
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        all_names.iter().any(|n| n.contains("Branch")),
+        "Should have a Branch divergence event, got: {:?}", all_names
+    );
+}
+
+#[test]
+fn test_flamegraph_empty_diff() {
+    // Create identical traces -> no divergences
+    let events = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 42 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 99 },
+    ]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events);
+    let trace_b_file = create_test_trace("test_kernel", &events);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let config = DiffConfig::default();
+    let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
+    assert!(result.is_identical(), "Precondition: traces should be identical");
+
+    // Export flamegraph
+    let output_file = NamedTempFile::new().unwrap();
+    let output_path = output_file.path().to_path_buf();
+    export_flamegraph(&trace_a, &trace_b, &result, None, &output_path).unwrap();
+
+    // Read the output and verify structure
+    let content = std::fs::read_to_string(&output_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert!(parsed.is_object(), "Output should be a JSON object");
+    assert!(parsed.get("traceEvents").is_some(), "Should have traceEvents key");
+
+    let trace_events = parsed["traceEvents"].as_array().unwrap();
+
+    // Should have only metadata events (no divergence-related duration/counter events)
+    let duration_events: Vec<_> = trace_events
+        .iter()
+        .filter(|e| e["ph"] == "X")
+        .collect();
+    assert!(
+        duration_events.is_empty(),
+        "Identical traces should produce no duration events, got {}",
+        duration_events.len()
+    );
+
+    let counter_events: Vec<_> = trace_events
+        .iter()
+        .filter(|e| e["ph"] == "C")
+        .collect();
+    assert!(
+        counter_events.is_empty(),
+        "Identical traces should produce no counter events, got {}",
+        counter_events.len()
+    );
+
+    // Metadata event for process name should still be present
+    let metadata_events: Vec<_> = trace_events
+        .iter()
+        .filter(|e| e["ph"] == "M")
+        .collect();
+    assert_eq!(metadata_events.len(), 1, "Should have exactly one metadata event (process_name)");
+}

@@ -20,8 +20,9 @@ dependencies = []
 
 [project.optional-dependencies]
 triton = ["triton>=3.0"]
+pytorch = ["torch>=2.0"]
 test = ["pytest>=7.0"]
-all = ["triton>=3.0"]
+all = ["triton>=3.0", "torch>=2.0"]
 
 [project.scripts]
 prlx = "prlx.cli:main"

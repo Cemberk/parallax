@@ -1,6 +1,7 @@
 """PRLX CLI — console entry point for the GPU differential debugger."""
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -459,7 +460,6 @@ def cmd_session_capture(args):
     manifest = output_dir / "session.json"
     if result == 0 and manifest.exists():
         print(f"Session captured: {output_dir}")
-        import json
         with open(manifest) as f:
             launches = json.load(f)
         print(f"  {len(launches)} kernel launch(es) recorded")
@@ -471,8 +471,6 @@ def cmd_session_capture(args):
 
 
 def cmd_session_inspect(args):
-    import json
-
     session_dir = Path(args.session_dir)
     manifest_path = session_dir / "session.json"
 
@@ -606,6 +604,269 @@ def cmd_triton(args):
     return 0
 
 
+def cmd_assert(args):
+    """CI regression gate: compare two traces and exit 0/1 based on divergence threshold."""
+
+    # Resolve trace paths: golden mode vs positional mode
+    if args.golden:
+        trace_a = Path(args.golden)
+        if not args.trace:
+            print("Error: --golden requires a test trace as positional argument",
+                  file=sys.stderr)
+            return 1
+        trace_b = Path(args.trace)
+    else:
+        if not args.trace_a_pos or not args.trace:
+            print("Error: assert requires two trace files (or --golden <golden> <test>)",
+                  file=sys.stderr)
+            return 1
+        trace_a = Path(args.trace_a_pos)
+        trace_b = Path(args.trace)
+
+    if not trace_a.exists():
+        print(f"Error: Trace A not found: {trace_a}", file=sys.stderr)
+        return 1
+    if not trace_b.exists():
+        print(f"Error: Trace B not found: {trace_b}", file=sys.stderr)
+        return 1
+
+    differ = _find_lib.find_differ_binary()
+    if not differ:
+        print(
+            "Error: prlx-diff binary not found.\n"
+            "       Install with: pip install prlx",
+            file=sys.stderr,
+        )
+        return 1
+
+    threshold = args.max_divergences
+
+    # Build prlx-diff command — always request JSON for structured output
+    cmd = [str(differ), str(trace_a), str(trace_b), "--json"]
+
+    if threshold > 0:
+        cmd.extend(["--max-allowed-divergences", str(threshold)])
+
+    if args.ignore_active_mask:
+        cmd.append("--ignore-active-mask")
+
+    if args.map:
+        cmd.extend(["--map", str(args.map)])
+
+    if args.session:
+        cmd.append("--session")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if args.json:
+        # Raw JSON passthrough to stdout
+        sys.stdout.write(result.stdout)
+        return result.returncode
+
+    # Parse JSON and print human-readable summary.
+    # The Rust binary may print non-JSON lines (e.g. "Loading traces...")
+    # before the JSON object, so extract the JSON portion.
+    stdout = result.stdout
+    json_start = stdout.find("{")
+    try:
+        if json_start >= 0:
+            data = json.loads(stdout[json_start:])
+        else:
+            data = json.loads(stdout)
+        count = data.get("total_divergences", data.get("divergence_count", 0))
+    except (json.JSONDecodeError, KeyError):
+        # If JSON parsing fails, fall back to exit code
+        if result.returncode == 0:
+            count = 0
+        else:
+            print("PRLX ASSERT: FAIL (could not parse prlx-diff output)",
+                  file=sys.stderr)
+            if result.stderr:
+                sys.stderr.write(result.stderr)
+            return result.returncode
+
+    if count <= threshold:
+        print(f"PRLX ASSERT: PASS ({count} divergences, threshold: {threshold})")
+    else:
+        print(f"PRLX ASSERT: FAIL ({count} divergences, threshold: {threshold})")
+
+    return result.returncode
+
+
+def cmd_flamegraph(args):
+    """Export divergences to Chrome Trace Format for flamegraph visualization."""
+
+    trace_a = Path(args.trace_a)
+    trace_b = Path(args.trace_b)
+
+    if not trace_a.exists():
+        print(f"Error: Trace A not found: {trace_a}", file=sys.stderr)
+        return 1
+    if not trace_b.exists():
+        print(f"Error: Trace B not found: {trace_b}", file=sys.stderr)
+        return 1
+
+    differ = _find_lib.find_differ_binary()
+    if not differ:
+        print(
+            "Error: prlx-diff binary not found.\n"
+            "       Install with: pip install prlx",
+            file=sys.stderr,
+        )
+        return 1
+
+    output = args.output or "prlx-flamegraph.json"
+
+    cmd = [
+        str(differ),
+        "--export-flamegraph", str(output),
+        str(trace_a), str(trace_b),
+    ]
+
+    if args.map:
+        cmd.extend(["--map", str(args.map)])
+    if args.values:
+        cmd.append("--values")
+    if args.force:
+        cmd.append("--force")
+    if args.session:
+        cmd.append("--session")
+
+    result = subprocess.call(cmd)
+
+    if result == 0:
+        output_path = Path(output)
+        if output_path.exists():
+            size = output_path.stat().st_size
+            if size < 1024:
+                size_str = f"{size} B"
+            elif size < 1024 * 1024:
+                size_str = f"{size / 1024:.1f} KB"
+            else:
+                size_str = f"{size / (1024 * 1024):.1f} MB"
+            print(f"Flamegraph written: {output} ({size_str})")
+            print("Open in chrome://tracing or https://ui.perfetto.dev")
+
+    return result
+
+
+def cmd_pytorch(args):
+    """PyTorch integration: info, run with instrumentation, or NVBit mode."""
+
+    if args.info:
+        print("=== PRLX PyTorch Integration ===")
+
+        # Check torch availability
+        try:
+            import torch
+            print(f"  PyTorch:          {torch.__version__}")
+            if torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name(0)
+                print(f"  CUDA Device:      {device_name}")
+            else:
+                print("  CUDA Device:      NOT AVAILABLE")
+        except ImportError:
+            print("  PyTorch:          NOT INSTALLED (pip install torch)")
+
+        # Check pass plugin
+        pass_plugin = _find_lib.find_pass_plugin()
+        if pass_plugin:
+            print(f"  LLVM Pass Plugin: {pass_plugin}")
+        else:
+            print("  LLVM Pass Plugin: NOT FOUND")
+
+        # Check NVBit tool
+        nvbit_lib = _find_nvbit_tool()
+        if nvbit_lib:
+            print(f"  NVBit Tool:       {nvbit_lib}")
+        else:
+            print("  NVBit Tool:       NOT FOUND")
+
+        # Check differ
+        differ = _find_lib.find_differ_binary()
+        if differ:
+            print(f"  Differ Binary:    {differ}")
+        else:
+            print("  Differ Binary:    NOT FOUND")
+
+        print()
+        print("Quick start:")
+        print("  prlx pytorch script.py           Run with LLVM pass instrumentation")
+        print("  prlx pytorch --nvbit script.py   Run with NVBit LD_PRELOAD")
+        return 0
+
+    if args.script:
+        script_path = Path(args.script)
+        if not script_path.exists():
+            print(f"Error: Script not found: {script_path}", file=sys.stderr)
+            return 1
+
+        env = os.environ.copy()
+
+        if args.nvbit:
+            # NVBit mode: LD_PRELOAD the NVBit tool
+            nvbit_lib = _find_nvbit_tool()
+            if not nvbit_lib:
+                print(
+                    "Error: NVBit tool (libprlx_nvbit.so) not found.\n"
+                    "       Build with: cmake --build build --target prlx_nvbit",
+                    file=sys.stderr,
+                )
+                return 1
+            existing_preload = env.get("LD_PRELOAD", "")
+            env["LD_PRELOAD"] = (
+                f"{existing_preload}:{nvbit_lib}" if existing_preload
+                else str(nvbit_lib)
+            )
+            print(f"Running with NVBit instrumentation: {script_path}")
+        else:
+            # LLVM pass mode
+            pass_plugin = _find_lib.find_pass_plugin()
+            if pass_plugin:
+                existing = env.get("LLVM_PASS_PLUGINS", "")
+                env["LLVM_PASS_PLUGINS"] = (
+                    f"{existing};{pass_plugin}" if existing else str(pass_plugin)
+                )
+            else:
+                print("Warning: LLVM pass plugin not found", file=sys.stderr)
+            print(f"Running with LLVM pass instrumentation: {script_path}")
+
+        if args.output:
+            env["PRLX_TRACE"] = args.output
+
+        cmd = [sys.executable, str(script_path)] + (args.script_args or [])
+        return subprocess.call(cmd, env=env)
+
+    print("Usage:")
+    print("  prlx pytorch --info              Show integration status")
+    print("  prlx pytorch script.py           Run with instrumentation")
+    print("  prlx pytorch --nvbit script.py   Run with NVBit LD_PRELOAD")
+    return 0
+
+
+def _find_nvbit_tool():
+    """Locate libprlx_nvbit.so for NVBit LD_PRELOAD mode."""
+    home = os.environ.get("PRLX_HOME")
+    if home:
+        p = Path(home) / "lib" / "libprlx_nvbit.so"
+        if p.exists():
+            return p.resolve()
+
+    root = _find_lib._project_root()
+    if root:
+        for build_dir in ("build-prlx", "build"):
+            p = root / build_dir / "lib" / "nvbit_tool" / "libprlx_nvbit.so"
+            if p.exists():
+                return p.resolve()
+
+    import shutil
+    path = shutil.which("libprlx_nvbit.so")
+    if path:
+        return Path(path)
+
+    return None
+
+
 def main():
     print_banner()
 
@@ -639,6 +900,19 @@ Examples:
 
   # Triton integration info
   prlx triton --info
+
+  # CI regression gate
+  prlx assert trace_a.prlx trace_b.prlx
+  prlx assert --golden golden.prlx test.prlx --max-divergences 5
+  prlx assert trace_a.prlx trace_b.prlx --json
+
+  # Export flamegraph for Chrome tracing
+  prlx flamegraph trace_a.prlx trace_b.prlx -o divergences.json
+
+  # PyTorch integration
+  prlx pytorch --info
+  prlx pytorch train.py
+  prlx pytorch --nvbit train.py
         """,
     )
 
@@ -769,6 +1043,60 @@ Examples:
     p_triton.add_argument("script_args", nargs="*",
                           help="Arguments to pass to the script")
 
+    # assert
+    p_assert = subparsers.add_parser(
+        "assert", help="CI regression gate: compare traces against threshold")
+    p_assert.add_argument("trace_a_pos", nargs="?",
+                          help="First trace file (baseline); "
+                               "omit when using --golden")
+    p_assert.add_argument("trace", nargs="?",
+                          help="Second trace file (test)")
+    p_assert.add_argument("--golden",
+                          help="Golden reference trace (trace_a); "
+                               "positional arg becomes trace_b")
+    p_assert.add_argument("--max-divergences", type=int, default=0,
+                          help="Maximum allowed divergences (default: 0 = identical)")
+    p_assert.add_argument("--json", action="store_true",
+                          help="Raw JSON passthrough to stdout")
+    p_assert.add_argument("--ignore-active-mask", action="store_true",
+                          help="Ignore active mask divergences")
+    p_assert.add_argument("--session", action="store_true",
+                          help="Compare session directories")
+    p_assert.add_argument("--map",
+                          help="Site mapping file (prlx-sites.json)")
+
+    # flamegraph
+    p_flamegraph = subparsers.add_parser(
+        "flamegraph",
+        help="Export divergences to Chrome Trace Format")
+    p_flamegraph.add_argument("trace_a", help="First trace file (baseline)")
+    p_flamegraph.add_argument("trace_b", help="Second trace file (compare)")
+    p_flamegraph.add_argument("-o", "--output",
+                              help="Output JSON file "
+                                   "(default: prlx-flamegraph.json)")
+    p_flamegraph.add_argument("--map",
+                              help="Site mapping file (prlx-sites.json)")
+    p_flamegraph.add_argument("--values", action="store_true",
+                              help="Include operand values")
+    p_flamegraph.add_argument("--force", action="store_true",
+                              help="Skip kernel name check")
+    p_flamegraph.add_argument("--session", action="store_true",
+                              help="Compare session directories")
+
+    # pytorch
+    p_pytorch = subparsers.add_parser(
+        "pytorch", help="PyTorch integration and instrumentation")
+    p_pytorch.add_argument("--info", action="store_true",
+                           help="Show PyTorch integration status")
+    p_pytorch.add_argument("--nvbit", action="store_true",
+                           help="Use NVBit LD_PRELOAD instead of LLVM pass")
+    p_pytorch.add_argument("-o", "--output",
+                           help="Output trace file (sets PRLX_TRACE)")
+    p_pytorch.add_argument("script", nargs="?",
+                           help="Python script to run")
+    p_pytorch.add_argument("script_args", nargs="*",
+                           help="Arguments to pass to the script")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -782,6 +1110,9 @@ Examples:
         "check": cmd_check,
         "session": cmd_session,
         "triton": cmd_triton,
+        "assert": cmd_assert,
+        "flamegraph": cmd_flamegraph,
+        "pytorch": cmd_pytorch,
     }
     handler = dispatch.get(args.command)
     if handler:

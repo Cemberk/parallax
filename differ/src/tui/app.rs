@@ -6,6 +6,7 @@ use crate::site_map::SiteMap;
 
 use super::aligned::AlignedTrace;
 use super::input::Action;
+use super::source_cache::SourceCache;
 
 /// Which pane has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,10 @@ pub struct App {
     pub float_format: bool,
     pub quit: bool,
     pub terminal_height: u16,
+
+    // Source view
+    pub source_view_enabled: bool,
+    pub source_cache: SourceCache,
 }
 
 impl App {
@@ -102,6 +107,8 @@ impl App {
             float_format,
             quit: false,
             terminal_height: 24,
+            source_view_enabled: false,
+            source_cache: SourceCache::new(),
         }
     }
 
@@ -160,6 +167,9 @@ impl App {
                 if self.current_warp > 0 {
                     self.jump_to_warp(self.current_warp - 1);
                 }
+            }
+            Action::ToggleSource => {
+                self.source_view_enabled = !self.source_view_enabled;
             }
             Action::None => {}
         }

@@ -177,6 +177,31 @@ def find_llvm_link_binary() -> Optional[Path]:
     return None
 
 
+def find_nvbit_library() -> Optional[Path]:
+    """Find libprlx_nvbit.so for SASS-level binary instrumentation."""
+    home = os.environ.get("PRLX_HOME")
+    if home:
+        for p in [
+            Path(home) / "lib" / "libprlx_nvbit.so",
+            Path(home) / "build" / "lib" / "nvbit_tool" / "libprlx_nvbit.so",
+        ]:
+            if p.exists():
+                return p.resolve()
+
+    p = _PACKAGE_DATA / "lib" / "libprlx_nvbit.so"
+    if p.exists():
+        return p.resolve()
+
+    root = _project_root()
+    if root:
+        for build_dir in ("build-prlx", "build"):
+            p = root / build_dir / "lib" / "nvbit_tool" / "libprlx_nvbit.so"
+            if p.exists():
+                return p.resolve()
+
+    return None
+
+
 def find_differ_binary() -> Optional[Path]:
     home = os.environ.get("PRLX_HOME")
     if home:

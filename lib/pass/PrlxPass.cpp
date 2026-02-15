@@ -97,20 +97,39 @@ bool PrlxPass::isNVPTXModule(const Module& M) const {
     return triple.find("nvptx") != std::string::npos;
 }
 
+bool PrlxPass::isAMDGPUModule(const Module& M) const {
+    return M.getTargetTriple().find("amdgcn") != std::string::npos;
+}
+
+bool PrlxPass::isGPUModule(const Module& M) const {
+    return isNVPTXModule(M) || isAMDGPUModule(M);
+}
+
+GPUTarget PrlxPass::getGPUTarget(const Module& M) const {
+    if (isNVPTXModule(M)) return GPUTarget::NVPTX;
+    if (isAMDGPUModule(M)) return GPUTarget::AMDGPU;
+    return GPUTarget::None;
+}
+
 bool PrlxPass::isDeviceFunction(const Function& F) const {
-    // In an NVPTX module, ALL non-declaration functions are device functions.
-    // Clang-compiled CUDA uses the default C calling convention in IR,
-    // and marks kernels via module-level !nvvm.annotations metadata (not
-    // function-level metadata). So we check the module's target triple
-    // instead of relying on calling conventions or function metadata.
+    // In an NVPTX or AMDGPU module, ALL non-declaration functions are device functions.
+    // Clang-compiled CUDA/HIP uses the default C calling convention in IR,
+    // and marks kernels via module-level metadata (not function-level metadata).
+    // So we check the module's target triple instead of relying on calling
+    // conventions or function metadata.
     const Module* M = F.getParent();
-    if (M && isNVPTXModule(*M)) {
+    if (M && isGPUModule(*M)) {
         return true;
     }
 
     // Fallback: check PTX calling conventions (set by some frontends)
     CallingConv::ID CC = F.getCallingConv();
     if (CC == 71 || CC == 72) {  // PTX_Kernel / PTX_Device
+        return true;
+    }
+
+    // Fallback: check AMDGPU calling conventions
+    if (CC == 91 || CC == 92 || CC == 93) {  // AMDGPU_KERNEL / AMDGPU_VS / AMDGPU_CS
         return true;
     }
 
@@ -520,11 +539,13 @@ void PrlxPass::embedSiteTable(Module& M, const SiteTable& siteTable) {
 }
 
 PreservedAnalyses PrlxPass::run(Module& M, ModuleAnalysisManager& AM) {
-    if (!isNVPTXModule(M)) {
+    target_ = getGPUTarget(M);
+    if (target_ == GPUTarget::None) {
         return PreservedAnalyses::all();
     }
 
-    errs() << "[prlx] Instrumenting NVPTX module: " << M.getName() << "\n";
+    const char* target_name = (target_ == GPUTarget::NVPTX) ? "NVPTX" : "AMDGPU";
+    errs() << "[prlx] Instrumenting " << target_name << " module: " << M.getName() << "\n";
 
     loadFilters();
     declareRuntimeFunctions(M);
@@ -553,7 +574,7 @@ PreservedAnalyses PrlxPass::run(Module& M, ModuleAnalysisManager& AM) {
         StringRef Name = F.getName();
         if (Name.starts_with("__prlx_")) continue;
 
-        // Skip CUDA builtin wrappers (mangled names contain these substrings)
+        // Skip CUDA/HIP builtin wrappers (mangled names contain these substrings)
         if (Name.contains("atomicAdd") || Name.contains("atomicSub") ||
             Name.contains("atomicExch") || Name.contains("atomicMin") ||
             Name.contains("atomicMax") || Name.contains("atomicCAS") ||
@@ -561,7 +582,10 @@ PreservedAnalyses PrlxPass::run(Module& M, ModuleAnalysisManager& AM) {
             Name.contains("atomicXor") || Name.contains("__activemask") ||
             Name.contains("__ballot") || Name.contains("__shfl") ||
             Name.contains("__syncthreads") || Name.contains("__threadfence") ||
-            Name.contains("__ldg") || Name.contains("__stcg")) continue;
+            Name.contains("__ldg") || Name.contains("__stcg") ||
+            // AMD/ROCm builtins
+            Name.contains("__builtin_amdgcn_") || Name.contains("__ockl_") ||
+            Name.contains("__hip_atomic")) continue;
 
         if (!matchesFilter(F)) {
             skipped++;
@@ -593,11 +617,20 @@ PreservedAnalyses PrlxPass::run(Module& M, ModuleAnalysisManager& AM) {
             for (Instruction& I : BB) {
                 if (auto* SI = dyn_cast<StoreInst>(&I)) {
                     unsigned AS = SI->getPointerAddressSpace();
-                    if (AS == 3) {  // Shared memory
+                    if (AS == 3) {  // Shared memory (same AS on both NVPTX and AMDGPU)
                         shmem_stores.push_back(SI);
                     } else if (instrument_stores && AS != 5) {
-                        // Global memory (addrspace 0 or 1), not local (5)
-                        global_stores.push_back(SI);
+                        // Global memory classification depends on target:
+                        // NVPTX: AS 0 (generic) and AS 1 (global) are global
+                        // AMDGPU: only AS 1 is global (AS 0 is flat/generic, not safe to assume global)
+                        if (target_ == GPUTarget::AMDGPU) {
+                            if (AS == 1) {
+                                global_stores.push_back(SI);
+                            }
+                        } else {
+                            // NVPTX: AS 0 or 1, not local (5)
+                            global_stores.push_back(SI);
+                        }
                     }
                 }
                 if (auto* AI = dyn_cast<AtomicRMWInst>(&I)) {

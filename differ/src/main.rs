@@ -7,6 +7,8 @@ use clap::Parser;
 use std::path::PathBuf;
 
 mod differ;
+mod flamegraph;
+mod json_output;
 mod parser;
 mod report;
 mod site_map;
@@ -94,6 +96,23 @@ struct Args {
     /// Continue comparing after path divergence (default: stop at first per warp)
     #[arg(long)]
     continue_after_path: bool,
+
+    /// Output results as machine-readable JSON (for CI integration)
+    #[arg(long)]
+    json: bool,
+
+    /// Maximum allowed divergences before failing (CI assert mode).
+    /// Exit 0 if divergences <= threshold, exit 1 otherwise.
+    #[arg(long)]
+    max_allowed_divergences: Option<usize>,
+
+    /// Only count branch/path/value divergences, ignore active mask differences (CI assert mode)
+    #[arg(long)]
+    ignore_active_mask: bool,
+
+    /// Export divergences to Chrome Trace Format for flamegraph visualization
+    #[arg(long, value_name = "PATH")]
+    export_flamegraph: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -103,7 +122,9 @@ fn main() -> Result<()> {
         return run_session_diff(&args);
     }
 
-    println!("Loading traces...");
+    if !args.json {
+        println!("Loading traces...");
+    }
     let trace_a = TraceFile::open(&args.trace_a)
         .with_context(|| format!("Failed to load trace A: {}", args.trace_a.display()))?;
 
@@ -119,8 +140,10 @@ fn main() -> Result<()> {
         None
     };
 
-    if let Some(ref map) = site_map {
-        println!("Loaded {} site mappings\n", map.len());
+    if !args.json {
+        if let Some(ref map) = site_map {
+            println!("Loaded {} site mappings\n", map.len());
+        }
     }
 
     if args.verbose {
@@ -145,7 +168,9 @@ fn main() -> Result<()> {
         let map_b = SiteMap::load(remap_b_path)
             .with_context(|| format!("Failed to load remap-b: {}", remap_b_path.display()))?;
         let r = SiteRemapper::build(&map_a, &map_b);
-        println!("Site remapper: {} site_ids remapped\n", r.num_remapped());
+        if !args.json {
+            println!("Site remapper: {} site_ids remapped\n", r.num_remapped());
+        }
         Some(r)
     } else {
         None
@@ -160,6 +185,36 @@ fn main() -> Result<()> {
     };
 
     let result = diff_traces_with_remap(&trace_a, &trace_b, &config, remapper.as_ref())?;
+
+    // Flamegraph export
+    if let Some(ref flamegraph_path) = args.export_flamegraph {
+        flamegraph::export_flamegraph(
+            &trace_a,
+            &trace_b,
+            &result,
+            site_map.as_ref(),
+            flamegraph_path,
+        )?;
+        eprintln!(
+            "Flamegraph exported to: {}\nOpen in chrome://tracing or https://ui.perfetto.dev",
+            flamegraph_path.display()
+        );
+    }
+
+    // JSON output mode (for CI)
+    if args.json {
+        let report = json_output::format_json_report(
+            &result,
+            site_map.as_ref(),
+            args.max_allowed_divergences,
+            args.ignore_active_mask,
+        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.passed {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     if args.tui {
         tui::run_tui(trace_a, trace_b, result, site_map, args.float)?;
@@ -182,17 +237,21 @@ fn main() -> Result<()> {
 
 /// Run session-mode diff: compare two session directories
 fn run_session_diff(args: &Args) -> Result<()> {
-    println!("Loading sessions...");
+    if !args.json {
+        println!("Loading sessions...");
+    }
     let session_a = SessionManifest::load(&args.trace_a)
         .with_context(|| format!("Failed to load session A: {}", args.trace_a.display()))?;
     let session_b = SessionManifest::load(&args.trace_b)
         .with_context(|| format!("Failed to load session B: {}", args.trace_b.display()))?;
 
-    println!(
-        "Session A: {} launches, Session B: {} launches\n",
-        session_a.launches.len(),
-        session_b.launches.len()
-    );
+    if !args.json {
+        println!(
+            "Session A: {} launches, Session B: {} launches\n",
+            session_a.launches.len(),
+            session_b.launches.len()
+        );
+    }
 
     let config = DiffConfig {
         compare_values: args.values,
@@ -203,6 +262,19 @@ fn run_session_diff(args: &Args) -> Result<()> {
     };
 
     let session_result = diff_session(&session_a, &session_b, &config);
+
+    // JSON output mode
+    if args.json {
+        let report = json_output::format_json_session_report(
+            &session_result,
+            args.max_allowed_divergences,
+        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.passed {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     let mut any_diverged = false;
     for (kernel_name, launch_idx, result) in &session_result.kernel_results {

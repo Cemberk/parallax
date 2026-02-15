@@ -47,3 +47,27 @@ def session(name: str, **kwargs):
     """Context manager for multi-kernel pipeline tracing."""
     from .runtime import session as _session
     return _session(name, **kwargs)
+
+
+def enable_pytorch(**kwargs):
+    """Hook into PyTorch for GPU kernel instrumentation.
+
+    Three-tier strategy:
+      Tier 1 — Triton via torch.compile (instrument_triton=True)
+      Tier 2 — load_inline hook (instrument_extensions=True)
+      Tier 3 — NVBit fallback (nvbit_precompiled=False)
+    """
+    from .pytorch_hook import install
+    install(**kwargs)
+
+
+def pytorch_trace(name: str, **kwargs):
+    """Context manager for tracing PyTorch GPU operations.
+
+    Usage::
+
+        with prlx.pytorch_trace("forward_pass") as t:
+            output = model(input)
+    """
+    from .pytorch_hook import PrlxTorchWrapper
+    return PrlxTorchWrapper(name, **kwargs)

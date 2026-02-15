@@ -7,6 +7,7 @@ mod aligned;
 mod app;
 mod input;
 mod render;
+pub mod source_cache;
 
 use std::io;
 use std::time::Duration;
