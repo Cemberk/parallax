@@ -189,8 +189,12 @@ void PrlxPass::instrumentBranch(BranchInst* BI, SiteTable& siteTable, Module& M)
     if (auto* CmpI = dyn_cast<ICmpInst>(Cond)) {
         Value* LHS = CmpI->getOperand(0);
         if (LHS->getType()->isIntegerTy()) {
-            if (LHS->getType()->getIntegerBitWidth() <= 32) {
+            unsigned BitW = LHS->getType()->getIntegerBitWidth();
+            if (BitW <= 32) {
                 OperandA = Builder.CreateZExtOrTrunc(LHS, Type::getInt32Ty(Ctx));
+            } else {
+                Value* Hi = Builder.CreateLShr(LHS, ConstantInt::get(LHS->getType(), 32));
+                OperandA = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
             }
         }
     } else if (auto* FCmpI = dyn_cast<FCmpInst>(Cond)) {
@@ -367,7 +371,7 @@ void PrlxPass::instrumentValueCaptures(BranchInst* BI, SiteTable& siteTable, Mod
     std::set<Instruction*> instrumented;
     for (Value* Op : operands) {
         Value* Current = Op;
-        for (int hop = 0; hop < 2; hop++) {
+        for (int hop = 0; hop < 6; hop++) {
             auto* Inst = dyn_cast<Instruction>(Current);
             if (!Inst) break;
 
@@ -402,7 +406,9 @@ void PrlxPass::instrumentValueCaptures(BranchInst* BI, SiteTable& siteTable, Mod
                 break;
             }
 
-            if (Inst->getNumOperands() >= 1 && isa<CastInst>(Inst)) {
+            // Walk through any single-result instruction (casts, GEP,
+            // extractvalue, etc.) to reach the underlying load.
+            if (Inst->getNumOperands() >= 1 && Inst->getType()->isSingleValueType()) {
                 Current = Inst->getOperand(0);
             } else {
                 break;

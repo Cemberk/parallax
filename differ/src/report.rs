@@ -186,9 +186,10 @@ fn print_divergence(div: &Divergence, site_map: Option<&SiteMap>, float_format: 
     }
 }
 
-/// Check if a cmp_predicate corresponds to an fcmp (float comparison)
+/// Check if a cmp_predicate corresponds to an fcmp (float comparison).
+/// LLVM FCmp predicates are 0-15, ICmp predicates are 32-41.
 fn is_fcmp_predicate(pred: u32) -> bool {
-    matches!(pred, 1 | 2 | 4 | 14)
+    pred <= 15
 }
 
 /// Print per-lane operand snapshot table
@@ -257,9 +258,27 @@ fn format_value(v: u32, as_float: bool) -> String {
     }
 }
 
-/// Get human-readable ICmp predicate string
+/// Get human-readable comparison predicate string (LLVM CmpInst::Predicate)
 fn icmp_predicate_str(pred: u32) -> &'static str {
     match pred {
+        // FCmp predicates (0-15)
+        0 => "fcmp false",
+        1 => "fcmp oeq",
+        2 => "fcmp ogt",
+        3 => "fcmp oge",
+        4 => "fcmp olt",
+        5 => "fcmp ole",
+        6 => "fcmp one",
+        7 => "fcmp ord",
+        8 => "fcmp uno",
+        9 => "fcmp ueq",
+        10 => "fcmp ugt",
+        11 => "fcmp uge",
+        12 => "fcmp ult",
+        13 => "fcmp ule",
+        14 => "fcmp une",
+        15 => "fcmp true",
+        // ICmp predicates (32-41)
         32 => "icmp eq",
         33 => "icmp ne",
         34 => "icmp ugt",
@@ -270,11 +289,6 @@ fn icmp_predicate_str(pred: u32) -> &'static str {
         39 => "icmp sge",
         40 => "icmp slt",
         41 => "icmp sle",
-        // FCmp predicates
-        1 => "fcmp oeq",
-        2 => "fcmp ogt",
-        4 => "fcmp olt",
-        14 => "fcmp une",
         _ => "cmp",
     }
 }

@@ -25,7 +25,10 @@ static bool initialized = false;
 static bool enabled = true;
 
 // Configuration from environment variables
-static uint32_t events_per_warp = PRLX_EVENTS_PER_WARP;
+// events_per_warp is compile-time only (PRLX_EVENTS_PER_WARP) — device code
+// uses this constant for buffer stride and overflow checks. A runtime override
+// would cause host/device stride mismatch and GPU memory corruption.
+static const uint32_t events_per_warp = PRLX_EVENTS_PER_WARP;
 static uint32_t sample_rate = 1;
 static bool compress_enabled = false;
 
@@ -68,10 +71,9 @@ extern "C" void prlx_init(void) {
     const char* enabled_str = getenv("PRLX_ENABLED");
     enabled = !enabled_str || atoi(enabled_str) != 0;
 
-    const char* buffer_size_str = getenv("PRLX_BUFFER_SIZE");
-    if (buffer_size_str) {
-        events_per_warp = atoi(buffer_size_str);
-    }
+    // Note: PRLX_BUFFER_SIZE env var was removed — events_per_warp is compile-time
+    // only (PRLX_EVENTS_PER_WARP). Changing it at runtime would cause device/host
+    // stride mismatch. To change buffer size, recompile with -DPRLX_EVENTS_PER_WARP=N.
 
     const char* history_depth_str = getenv("PRLX_HISTORY_DEPTH");
     if (history_depth_str) {
@@ -345,6 +347,12 @@ extern "C" void prlx_post_launch(void) {
 
     // Determine output path (session mode or single-file mode)
     char effective_path[512];
+    if (session_active && session_entry_count >= PRLX_MAX_SESSION_ENTRIES) {
+        fprintf(stderr, "[prlx] WARNING: Session entry limit reached (%u). "
+                "Trace will be written to '%s' instead of session directory.\n",
+                PRLX_MAX_SESSION_ENTRIES, output_path);
+    }
+
     if (session_active && session_entry_count < PRLX_MAX_SESSION_ENTRIES) {
         // Session mode: write to session_dir/kernel_N.prlx
         snprintf(effective_path, sizeof(effective_path), "%s/%s_%u.prlx",
@@ -509,6 +517,22 @@ extern "C" void prlx_session_begin(const char* name) {
     fprintf(stderr, "[prlx] Session started: %s\n", session_dir);
 }
 
+// Escape a string for JSON output (handles backslash, quote, control chars)
+static void fprint_json_string(FILE* f, const char* str) {
+    fputc('"', f);
+    for (const char* p = str; *p; p++) {
+        switch (*p) {
+            case '\\': fputs("\\\\", f); break;
+            case '"':  fputs("\\\"", f); break;
+            case '\n': fputs("\\n", f);  break;
+            case '\r': fputs("\\r", f);  break;
+            case '\t': fputs("\\t", f);  break;
+            default:   fputc(*p, f);     break;
+        }
+    }
+    fputc('"', f);
+}
+
 // Session API: end session and write manifest
 extern "C" void prlx_session_end(void) {
     if (!session_active) return;
@@ -523,8 +547,8 @@ extern "C" void prlx_session_end(void) {
             const SessionEntry& e = session_entries[i];
             fprintf(f, "  {\n");
             fprintf(f, "    \"launch\": %u,\n", e.launch_idx);
-            fprintf(f, "    \"kernel\": \"%s\",\n", e.kernel_name);
-            fprintf(f, "    \"file\": \"%s\",\n", e.filename);
+            fprintf(f, "    \"kernel\": "); fprint_json_string(f, e.kernel_name); fprintf(f, ",\n");
+            fprintf(f, "    \"file\": "); fprint_json_string(f, e.filename); fprintf(f, ",\n");
             fprintf(f, "    \"grid\": [%u, %u, %u],\n", e.grid_dim[0], e.grid_dim[1], e.grid_dim[2]);
             fprintf(f, "    \"block\": [%u, %u, %u]\n", e.block_dim[0], e.block_dim[1], e.block_dim[2]);
             fprintf(f, "  }%s\n", (i < session_entry_count - 1) ? "," : "");

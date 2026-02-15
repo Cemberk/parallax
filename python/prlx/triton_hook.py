@@ -72,8 +72,17 @@ def install(pass_plugin: Optional[str] = None, verbose: bool = True):
         print("[prlx] Triton integration installed", file=sys.stderr)
 
 
+def _get_subprocess_timeout() -> int:
+    """Get timeout for llvm-link/opt subprocesses (seconds)."""
+    try:
+        return int(os.environ.get("PRLX_OPT_TIMEOUT", "120"))
+    except ValueError:
+        return 120
+
+
 def _instrument_llvm_ir(llvm_ir: str) -> str:
     """input.ll -> llvm-link (+ runtime BC) -> opt (+ pass) -> output.ll"""
+    timeout = _get_subprocess_timeout()
     with tempfile.TemporaryDirectory(prefix="prlx_") as tmpdir:
         input_path = os.path.join(tmpdir, "input.ll")
         linked_path = os.path.join(tmpdir, "linked.ll")
@@ -92,7 +101,7 @@ def _instrument_llvm_ir(llvm_ir: str) -> str:
             "--suppress-warnings",
         ]
         result = subprocess.run(
-            link_cmd, capture_output=True, text=True, timeout=30
+            link_cmd, capture_output=True, text=True, timeout=timeout
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -109,7 +118,7 @@ def _instrument_llvm_ir(llvm_ir: str) -> str:
             "-o", output_path,
         ]
         result = subprocess.run(
-            opt_cmd, capture_output=True, text=True, timeout=30
+            opt_cmd, capture_output=True, text=True, timeout=timeout
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -195,7 +204,19 @@ def _wrap_triton_launch(verbose: bool):
 
         grid = kwargs.get("grid", (1, 1, 1))
         if callable(grid):
-            grid_dim = (1, 1, 1)
+            # Triton typically passes grid as a lambda; evaluate it to get
+            # actual dimensions. Pass kwargs as the meta dict (Triton convention).
+            try:
+                resolved = grid(kwargs)
+                if isinstance(resolved, (tuple, list)):
+                    grid_dim = tuple(resolved) + (1,) * (3 - len(resolved))
+                else:
+                    grid_dim = (int(resolved), 1, 1)
+            except Exception:
+                # If grid lambda fails (e.g. needs meta keys we don't have),
+                # fall back to num_warps-based estimate to avoid OOB writes.
+                num_warps = kwargs.get("num_warps", 4)
+                grid_dim = (num_warps, 1, 1)
         elif isinstance(grid, (tuple, list)):
             grid_dim = tuple(grid) + (1,) * (3 - len(grid))
         else:

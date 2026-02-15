@@ -335,6 +335,10 @@ void nvbit_at_cuda_event(
                     g_writer->write(kernel_file, g_config.compress);
                     g_writer->clear();
                 }
+                // Write site map after each launch so it survives crashes
+                if (g_site_table.size() > 0) {
+                    g_site_table.export_json(g_config.sites_path);
+                }
             }
         }
     }
