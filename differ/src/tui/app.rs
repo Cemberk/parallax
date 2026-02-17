@@ -21,6 +21,7 @@ pub enum FocusPane {
 pub enum InputMode {
     Normal,
     WarpJump,
+    Search,
 }
 
 /// Per-warp summary for fast overview.
@@ -54,6 +55,12 @@ pub struct App {
     // Source view
     pub source_view_enabled: bool,
     pub source_cache: SourceCache,
+
+    // Search
+    pub search_query: String,
+    pub search_matches: Vec<usize>,
+    pub search_match_idx: usize,
+    pub search_active: bool,
 }
 
 impl App {
@@ -109,6 +116,10 @@ impl App {
             terminal_height: 24,
             source_view_enabled: false,
             source_cache: SourceCache::new(),
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_match_idx: 0,
+            search_active: false,
         }
     }
 
@@ -137,8 +148,20 @@ impl App {
                     self.clamp_scroll();
                 }
             }
-            Action::NextDivergence => self.next_divergence(),
-            Action::PrevDivergence => self.prev_divergence(),
+            Action::NextDivergence => {
+                if self.search_active && !self.search_matches.is_empty() {
+                    self.handle_action(Action::NextSearchMatch);
+                } else {
+                    self.next_divergence();
+                }
+            }
+            Action::PrevDivergence => {
+                if self.search_active && !self.search_matches.is_empty() {
+                    self.handle_action(Action::PrevSearchMatch);
+                } else {
+                    self.prev_divergence();
+                }
+            }
             Action::CycleFocus => self.cycle_focus(),
             Action::StartWarpJump => {
                 self.input_mode = InputMode::WarpJump;
@@ -170,6 +193,54 @@ impl App {
             }
             Action::ToggleSource => {
                 self.source_view_enabled = !self.source_view_enabled;
+            }
+            Action::StartSearch => {
+                self.input_mode = InputMode::Search;
+                self.search_query.clear();
+                self.search_matches.clear();
+                self.search_match_idx = 0;
+            }
+            Action::SearchChar(c) => {
+                self.search_query.push(c);
+                self.update_search_matches();
+            }
+            Action::SearchBackspace => {
+                self.search_query.pop();
+                self.update_search_matches();
+            }
+            Action::SearchConfirm => {
+                self.input_mode = InputMode::Normal;
+                self.search_active = !self.search_matches.is_empty();
+                if let Some(&row) = self.search_matches.first() {
+                    self.selected_row = row;
+                    self.search_match_idx = 0;
+                    self.clamp_scroll();
+                }
+            }
+            Action::SearchCancel => {
+                self.input_mode = InputMode::Normal;
+                self.search_query.clear();
+                self.search_matches.clear();
+                self.search_active = false;
+            }
+            Action::NextSearchMatch => {
+                if !self.search_matches.is_empty() {
+                    self.search_match_idx =
+                        (self.search_match_idx + 1) % self.search_matches.len();
+                    self.selected_row = self.search_matches[self.search_match_idx];
+                    self.clamp_scroll();
+                }
+            }
+            Action::PrevSearchMatch => {
+                if !self.search_matches.is_empty() {
+                    self.search_match_idx = if self.search_match_idx == 0 {
+                        self.search_matches.len() - 1
+                    } else {
+                        self.search_match_idx - 1
+                    };
+                    self.selected_row = self.search_matches[self.search_match_idx];
+                    self.clamp_scroll();
+                }
             }
             Action::None => {}
         }
@@ -302,6 +373,52 @@ impl App {
             FocusPane::TraceB => FocusPane::Detail,
             FocusPane::Detail => FocusPane::TraceA,
         };
+    }
+
+    fn update_search_matches(&mut self) {
+        self.search_matches.clear();
+        if self.search_query.is_empty() {
+            return;
+        }
+        let query = self.search_query.to_lowercase();
+        let view = self.aligned.warp_view(self.current_warp);
+        for (row_idx, row) in view.rows.iter().enumerate() {
+            let mut haystack = String::new();
+            if let Some(ref ev) = row.event_a {
+                haystack.push_str(&format!("0x{:08x} ", ev.site_id));
+                let etype = match ev.event_type {
+                    0 => "branch",
+                    1 => "shmem",
+                    2 => "atomic",
+                    3 => "funcentry",
+                    4 => "funcexit",
+                    5 => "switch",
+                    6 => "globalstore",
+                    _ => "unknown",
+                };
+                haystack.push_str(etype);
+                haystack.push(' ');
+            }
+            if let Some(ref ev) = row.event_b {
+                haystack.push_str(&format!("0x{:08x} ", ev.site_id));
+            }
+            for div in &row.divergences {
+                let kind = match div {
+                    super::aligned::RowDivergence::Branch { .. } => "branch",
+                    super::aligned::RowDivergence::ActiveMask { .. } => "activemask",
+                    super::aligned::RowDivergence::Value { .. } => "value",
+                    super::aligned::RowDivergence::Path { .. } => "path",
+                    super::aligned::RowDivergence::ExtraInA => "extra",
+                    super::aligned::RowDivergence::ExtraInB => "extra",
+                };
+                haystack.push_str(kind);
+                haystack.push(' ');
+            }
+            if haystack.to_lowercase().contains(&query) {
+                self.search_matches.push(row_idx);
+            }
+        }
+        self.search_match_idx = 0;
     }
 
     /// Count which divergence number the current selection is (1-based), or 0.

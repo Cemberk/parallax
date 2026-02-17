@@ -1965,3 +1965,189 @@ fn test_flamegraph_empty_diff() {
         .collect();
     assert_eq!(metadata_events.len(), 1, "Should have exactly one metadata event (process_name)");
 }
+
+// ---- Cross-GPU tests ----
+
+fn create_test_trace_arch(kernel_name: &str, events: &[Vec<TraceEvent>], cuda_arch: u32) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+
+    let mut header = TraceFileHeader {
+        magic: PRLX_MAGIC,
+        version: PRLX_VERSION,
+        flags: 0,
+        kernel_name_hash: 0x1234567890ABCDEF,
+        kernel_name: [0; 64],
+        grid_dim: [1, 1, 1],
+        block_dim: [32, 1, 1],
+        num_warps_per_block: 1,
+        total_warp_slots: events.len() as u32,
+        events_per_warp: PRLX_EVENTS_PER_WARP as u32,
+        _pad: 0,
+        timestamp: 1234567890,
+        cuda_arch,
+        history_depth: 0,
+        history_section_offset: 0,
+        sample_rate: 0,
+        snapshot_depth: 0,
+        snapshot_section_offset: 0,
+    };
+
+    let name_bytes = kernel_name.as_bytes();
+    let copy_len = name_bytes.len().min(63);
+    header.kernel_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    let header_bytes: &[u8] = bytemuck::bytes_of(&header);
+    file.write_all(header_bytes).unwrap();
+
+    for warp_events in events {
+        let warp_header = WarpBufferHeader {
+            write_idx: warp_events.len() as u32,
+            overflow_count: 0,
+            num_events: warp_events.len() as u32,
+            total_event_count: 0,
+        };
+        file.write_all(bytemuck::bytes_of(&warp_header)).unwrap();
+
+        for event in warp_events {
+            file.write_all(bytemuck::bytes_of(event)).unwrap();
+        }
+
+        let remaining = PRLX_EVENTS_PER_WARP - warp_events.len();
+        let zero_event = TraceEvent {
+            site_id: 0, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0, value_a: 0,
+        };
+        for _ in 0..remaining {
+            file.write_all(bytemuck::bytes_of(&zero_event)).unwrap();
+        }
+    }
+
+    file.flush().unwrap();
+    file
+}
+
+#[test]
+fn test_cross_gpu_different_arch() {
+    // Trace A: NVIDIA SM_80, Trace B: AMD gfx1030 (0x1030)
+    let events = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 42 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 99 },
+    ]];
+
+    let trace_a_file = create_test_trace_arch("test_kernel", &events, 80);
+    let trace_b_file = create_test_trace_arch("test_kernel", &events, 0x1030);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let config = DiffConfig {
+        cross_gpu: true,
+        force: true,
+        ..DiffConfig::default()
+    };
+    let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
+
+    // Same events → no divergences even across different architectures
+    assert!(result.is_identical(), "Cross-GPU identical events should produce no divergences");
+    assert!(result.cross_gpu_info.is_some(), "cross_gpu_info should be populated");
+
+    let info = result.cross_gpu_info.unwrap();
+    assert_eq!(info.warp_size_a, 32);
+    assert_eq!(info.warp_size_b, 64);
+}
+
+#[test]
+fn test_cross_gpu_popcount_mask_comparison() {
+    // Different bit patterns but same popcount → treated as equivalent in cross-GPU mode
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0x0000FFFF, value_a: 42 },
+    ]];
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFF0000, value_a: 42 },
+    ]];
+
+    let trace_a_file = create_test_trace_arch("test_kernel", &events_a, 80);
+    let trace_b_file = create_test_trace_arch("test_kernel", &events_b, 0x1030);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let config = DiffConfig {
+        cross_gpu: true,
+        force: true,
+        ..DiffConfig::default()
+    };
+    let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
+
+    // Same popcount (16) → no mask divergence in cross-GPU mode
+    assert!(
+        result.is_identical(),
+        "Cross-GPU should compare active masks by popcount, not exact bits"
+    );
+}
+
+#[test]
+fn test_cross_gpu_branch_divergence_detected() {
+    // Cross-GPU mode should still detect branch direction differences
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 42 },
+    ]];
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 42 },
+    ]];
+
+    let trace_a_file = create_test_trace_arch("test_kernel", &events_a, 80);
+    let trace_b_file = create_test_trace_arch("test_kernel", &events_b, 0x1030);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let config = DiffConfig {
+        cross_gpu: true,
+        force: true,
+        ..DiffConfig::default()
+    };
+    let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
+
+    assert_eq!(result.divergences.len(), 1, "Branch divergence should be detected across GPUs");
+    match &result.divergences[0].kind {
+        DivergenceKind::Branch { dir_a: 1, dir_b: 0 } => {}
+        other => panic!("Expected Branch divergence, got {:?}", other),
+    }
+}
+
+// ---- CSV export test ----
+
+#[test]
+fn test_csv_export() {
+    let events_a = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 1, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 42 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 99 },
+    ]];
+    let events_b = vec![vec![
+        TraceEvent { site_id: 0x1000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 42 },
+        TraceEvent { site_id: 0x2000, event_type: 0, branch_dir: 0, _reserved: 0, active_mask: 0xFFFFFFFF, value_a: 99 },
+    ]];
+
+    let trace_a_file = create_test_trace("test_kernel", &events_a);
+    let trace_b_file = create_test_trace("test_kernel", &events_b);
+
+    let trace_a = prlx_diff::parser::TraceFile::open(trace_a_file.path()).unwrap();
+    let trace_b = prlx_diff::parser::TraceFile::open(trace_b_file.path()).unwrap();
+
+    let config = DiffConfig::default();
+    let result = diff_traces(&trace_a, &trace_b, &config).unwrap();
+    assert!(!result.is_identical());
+
+    let csv_file = NamedTempFile::new().unwrap();
+    let csv_path = csv_file.path().to_path_buf();
+    prlx_diff::csv_output::export_csv(&result, None, &csv_path).unwrap();
+
+    let content = std::fs::read_to_string(&csv_path).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Header + at least 1 data row
+    assert!(lines.len() >= 2, "CSV should have header + data rows");
+    assert_eq!(lines[0], "warp_idx,event_idx,site_id,kind,details,source_location");
+    assert!(lines[1].contains("Branch"), "First divergence should be Branch type");
+    assert!(lines[1].contains("0x00001000"), "Should contain site_id");
+}

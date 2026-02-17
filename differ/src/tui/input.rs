@@ -24,6 +24,13 @@ pub enum Action {
     WarpJumpConfirm,
     WarpJumpCancel,
     ToggleSource,
+    StartSearch,
+    SearchChar(char),
+    SearchBackspace,
+    SearchConfirm,
+    SearchCancel,
+    NextSearchMatch,
+    PrevSearchMatch,
     None,
 }
 
@@ -31,6 +38,7 @@ pub enum Action {
 pub fn map_key(key: KeyEvent, mode: &InputMode) -> Action {
     match mode {
         InputMode::WarpJump => map_warp_jump_key(key),
+        InputMode::Search => map_search_key(key),
         InputMode::Normal => map_normal_key(key),
     }
 }
@@ -60,6 +68,7 @@ fn map_normal_key(key: KeyEvent) -> Action {
         KeyCode::Char(']') => Action::NextWarp,
         KeyCode::Char('[') => Action::PrevWarp,
         KeyCode::Char('s') => Action::ToggleSource,
+        KeyCode::Char('?') => Action::StartSearch,
         _ => Action::None,
     }
 }
@@ -73,6 +82,16 @@ fn map_warp_jump_key(key: KeyEvent) -> Action {
             // We'll handle backspace as cancel + restart for simplicity.
             Action::WarpJumpCancel
         }
+        _ => Action::None,
+    }
+}
+
+fn map_search_key(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Enter => Action::SearchConfirm,
+        KeyCode::Esc => Action::SearchCancel,
+        KeyCode::Backspace => Action::SearchBackspace,
+        KeyCode::Char(c) => Action::SearchChar(c),
         _ => Action::None,
     }
 }

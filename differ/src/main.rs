@@ -4,9 +4,11 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 mod classifier;
+pub mod csv_output;
 mod differ;
 mod flamegraph;
 mod json_output;
@@ -123,6 +125,22 @@ struct Args {
     /// Export divergences to Chrome Trace Format for flamegraph visualization
     #[arg(long, value_name = "PATH")]
     export_flamegraph: Option<PathBuf>,
+
+    /// Filter by warp indices (e.g., "0-10,15,20-25")
+    #[arg(long)]
+    warps: Option<String>,
+
+    /// Filter by divergence kind (e.g., "Branch,Value") — case-insensitive
+    #[arg(long)]
+    filter_kind: Option<String>,
+
+    /// Filter by site IDs (e.g., "0x12345678,0xABCDEF01")
+    #[arg(long)]
+    filter_sites: Option<String>,
+
+    /// Export divergences to CSV file
+    #[arg(long, value_name = "PATH")]
+    csv: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -195,7 +213,47 @@ fn main() -> Result<()> {
         cross_gpu: args.cross_gpu,
     };
 
-    let result = diff_traces_with_remap(&trace_a, &trace_b, &config, remapper.as_ref())?;
+    let mut result = diff_traces_with_remap(&trace_a, &trace_b, &config, remapper.as_ref())?;
+
+    // Apply post-diff filters
+    if let Some(ref warp_spec) = args.warps {
+        let warp_set = parse_warp_spec(warp_spec);
+        result.divergences.retain(|d| warp_set.contains(&d.warp_idx));
+    }
+    if let Some(ref kind_spec) = args.filter_kind {
+        let kinds: HashSet<String> = kind_spec
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        result.divergences.retain(|d| {
+            let name = match &d.kind {
+                differ::DivergenceKind::Branch { .. } => "branch",
+                differ::DivergenceKind::ActiveMask { .. } => "activemask",
+                differ::DivergenceKind::Value { .. } => "value",
+                differ::DivergenceKind::Path { .. } => "path",
+                differ::DivergenceKind::ExtraEvents { .. } => "extraevents",
+            };
+            kinds.contains(name)
+        });
+    }
+    if let Some(ref site_spec) = args.filter_sites {
+        let sites: HashSet<u32> = site_spec
+            .split(',')
+            .filter_map(|s| {
+                let s = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+                u32::from_str_radix(s, 16).ok()
+            })
+            .collect();
+        result.divergences.retain(|d| sites.contains(&d.site_id));
+    }
+
+    // CSV export
+    if let Some(ref csv_path) = args.csv {
+        csv_output::export_csv(&result, site_map.as_ref(), csv_path)?;
+        if !args.json {
+            eprintln!("CSV exported to: {}", csv_path.display());
+        }
+    }
 
     // Flamegraph export
     if let Some(ref flamegraph_path) = args.export_flamegraph {
@@ -328,6 +386,24 @@ fn run_session_diff(args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse a warp spec like "0-10,15,20-25" into a HashSet<u32>.
+fn parse_warp_spec(spec: &str) -> HashSet<u32> {
+    let mut set = HashSet::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if let Some((a, b)) = part.split_once('-') {
+            if let (Ok(lo), Ok(hi)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>()) {
+                for w in lo..=hi {
+                    set.insert(w);
+                }
+            }
+        } else if let Ok(w) = part.parse::<u32>() {
+            set.insert(w);
+        }
+    }
+    set
 }
 
 /// Dump first N events from a trace (for debugging)

@@ -1,7 +1,7 @@
 //! Rendering logic for the 3-pane TUI layout.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
@@ -88,7 +88,17 @@ fn draw_event_pane(frame: &mut Frame, app: &mut App, area: Rect, side: PaneSide)
     } else {
         view.rows[start..end]
             .iter()
-            .map(|row| format_event_line(row, side, row.row_idx == app.selected_row, area.width))
+            .map(|row| {
+                let is_search_match = app.search_active
+                    && app.search_matches.contains(&row.row_idx);
+                format_event_line(
+                    row,
+                    side,
+                    row.row_idx == app.selected_row,
+                    is_search_match,
+                    area.width,
+                )
+            })
             .collect()
     };
 
@@ -101,7 +111,13 @@ fn draw_event_pane(frame: &mut Frame, app: &mut App, area: Rect, side: PaneSide)
     frame.render_widget(paragraph, area);
 }
 
-fn format_event_line(row: &AlignedRow, side: PaneSide, is_selected: bool, width: u16) -> Line {
+fn format_event_line(
+    row: &AlignedRow,
+    side: PaneSide,
+    is_selected: bool,
+    is_search_match: bool,
+    width: u16,
+) -> Line {
     let evt = match side {
         PaneSide::Left => &row.event_a,
         PaneSide::Right => &row.event_b,
@@ -159,25 +175,20 @@ fn format_event_line(row: &AlignedRow, side: PaneSide, is_selected: bool, width:
                 }
             }
 
-            let mut style = Style::default();
+            let mut line = Line::from(spans);
+
+            // Apply row-level style
             if is_selected {
-                style = style.add_modifier(Modifier::REVERSED);
+                line = line.add_modifier(Modifier::REVERSED);
+            }
+            if is_search_match && !is_selected {
+                line = line.style(Style::default().bg(Color::DarkGray));
             }
             if has_divergence {
-                // Pick color based on the most severe divergence.
                 let color = divergence_color(&row.divergences);
-                style = style.fg(color);
+                line = line.style(Style::default().fg(color));
             }
 
-            Line::styled(
-                spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
-                Style::default(),
-            );
-            // Build line from styled spans, then apply row-level style.
-            let mut line = Line::from(spans);
-            if is_selected || has_divergence {
-                line = line.style(style);
-            }
             line
         }
         None => {
@@ -739,6 +750,24 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
                 ),
             ])
         }
+        InputMode::Search => {
+            Line::from(vec![
+                Span::styled(" Search: ", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    app.search_query.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "_  ({} matches, Enter=confirm, Esc=cancel)",
+                        app.search_matches.len()
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        }
         InputMode::Normal => {
             let num_warps = app.aligned.num_warps();
             let view = app.aligned.warp_view(app.current_warp);
@@ -746,6 +775,17 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             let (div_pos, div_total) = app.current_div_position();
 
             let kernel_name = app.aligned.trace_a.header().kernel_name_str().to_string();
+
+            let search_info = if app.search_active {
+                format!(
+                    " [?\"{}\" {}/{}]",
+                    app.search_query,
+                    app.search_match_idx + 1,
+                    app.search_matches.len()
+                )
+            } else {
+                String::new()
+            };
 
             Line::from(vec![
                 Span::styled(
@@ -766,12 +806,13 @@ fn draw_status_bar(frame: &mut Frame, app: &mut App, area: Rect) {
                         Style::default().fg(Color::Green)
                     },
                 ),
+                Span::styled(search_info, Style::default().fg(Color::Yellow)),
                 Span::styled(" | ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     if app.aligned.has_history() {
-                        "[n]ext [N]prev [/]warp [s]ource [q]uit [hist] "
+                        "[n]ext [N]prev [/]warp [?]search [s]ource [q]uit "
                     } else {
-                        "[n]ext [N]prev [/]warp [s]ource [q]uit "
+                        "[n]ext [N]prev [/]warp [?]search [s]ource [q]uit "
                     },
                     Style::default().fg(Color::DarkGray),
                 ),
