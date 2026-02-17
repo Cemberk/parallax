@@ -1,0 +1,57 @@
+{% set version = "0.1.0" %}
+
+package:
+  name: prlx
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  script: |
+    # Build C++/CUDA
+    cmake -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DPRLX_CUDA_ARCHITECTURES="70;80;90"
+    cmake --build build
+
+    # Build Rust differ
+    cd differ && cargo build --release && cd ..
+
+    # Install native artifacts
+    mkdir -p $PREFIX/lib $PREFIX/bin $PREFIX/share/prlx
+    cp build/lib/pass/libPrlxPass.so $PREFIX/lib/
+    cp build/lib/runtime/libprlx_runtime_shared.so $PREFIX/lib/
+    cp build/lib/runtime/prlx_runtime_nvptx.bc $PREFIX/share/prlx/
+    cp differ/target/release/prlx-diff $PREFIX/bin/
+
+    # Install Python package
+    $PYTHON -m pip install . --no-deps --no-build-isolation
+
+requirements:
+  build:
+    - cmake >=3.20
+    - ninja
+    - {{ compiler('cxx') }}
+    - rust >=1.70
+  host:
+    - python
+    - pip
+    - setuptools >=64
+    - setuptools-scm >=8
+    - llvmdev >=18
+    - cuda-toolkit
+  run:
+    - python
+
+test:
+  imports:
+    - prlx
+  commands:
+    - prlx --help
+
+about:
+  home: https://github.com/khushiyant/parallax
+  license: MIT
+  summary: Differential debugger for CUDA/Triton GPU kernels
