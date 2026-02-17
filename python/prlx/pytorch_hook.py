@@ -11,14 +11,15 @@ Three-tier instrumentation strategy:
 Requires PyTorch >= 2.0.
 """
 
-import logging
 import os
 import sys
 import functools
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from ._log import get_logger
+
+logger = get_logger(__name__)
 
 from ._find_lib import (
     find_pass_plugin,
@@ -63,12 +64,10 @@ def install(
     global _installed
 
     if _installed:
-        if verbose:
-            print("[prlx] PyTorch integration already installed", file=sys.stderr)
+        logger.info("PyTorch integration already installed")
         return
 
-    if verbose:
-        print("[prlx] Installing PyTorch integration...", file=sys.stderr)
+    logger.info("Installing PyTorch integration...")
 
     tiers_installed = 0
 
@@ -77,33 +76,21 @@ def install(
             _hook_triton_via_torch(verbose)
             tiers_installed += 1
         except Exception as e:
-            if verbose:
-                print(
-                    f"[prlx] Tier 1 (Triton via torch.compile) unavailable: {e}",
-                    file=sys.stderr,
-                )
+            logger.info("Tier 1 (Triton via torch.compile) skipped: %s", e)
 
     if instrument_extensions:
         try:
             _hook_cpp_extension(verbose)
             tiers_installed += 1
         except Exception as e:
-            if verbose:
-                print(
-                    f"[prlx] Tier 2 (load_inline hook) unavailable: {e}",
-                    file=sys.stderr,
-                )
+            logger.info("Tier 2 (load_inline hook) skipped: %s", e)
 
     if nvbit_precompiled:
         try:
             _setup_nvbit(verbose)
             tiers_installed += 1
         except Exception as e:
-            if verbose:
-                print(
-                    f"[prlx] Tier 3 (NVBit fallback) unavailable: {e}",
-                    file=sys.stderr,
-                )
+            logger.info("Tier 3 (NVBit fallback) skipped: %s", e)
 
     if tiers_installed == 0:
         raise RuntimeError(
@@ -112,11 +99,7 @@ def install(
         )
 
     _installed = True
-    if verbose:
-        print(
-            f"[prlx] PyTorch integration installed ({tiers_installed} tier(s) active)",
-            file=sys.stderr,
-        )
+    logger.info("PyTorch integration installed (%d tier(s) active)", tiers_installed)
 
 
 def _hook_triton_via_torch(verbose: bool):
@@ -141,13 +124,10 @@ def _hook_triton_via_torch(verbose: bool):
 
     triton_install(verbose=verbose)
     _tier1_active = True
-
-    if verbose:
-        print(
-            "[prlx] Tier 1: Triton instrumentation active "
-            "(covers torch.compile / inductor kernels)",
-            file=sys.stderr,
-        )
+    logger.info(
+        "Tier 1: Triton instrumentation active "
+        "(covers torch.compile / inductor kernels)"
+    )
 
 
 def _hook_cpp_extension(verbose: bool):
@@ -209,12 +189,7 @@ def _hook_cpp_extension(verbose: bool):
 
     cpp_ext.load_inline = patched_load_inline
     _tier2_active = True
-
-    if verbose:
-        print(
-            f"[prlx] Tier 2: load_inline hooked (pass: {pass_plugin})",
-            file=sys.stderr,
-        )
+    logger.info("Tier 2: load_inline hooked (pass: %s)", pass_plugin)
 
 
 def _setup_nvbit(verbose: bool):
@@ -240,15 +215,14 @@ def _setup_nvbit(verbose: bool):
     try:
         import torch.cuda
         if torch.cuda.is_available() and torch.cuda._initialized:
-            print(
-                "[prlx] WARNING: CUDA already initialized. NVBit LD_PRELOAD "
+            logger.warning(
+                "CUDA already initialized. NVBit LD_PRELOAD "
                 "may not intercept existing contexts. For best results, call "
                 "prlx.enable_pytorch(nvbit_precompiled=True) before any "
-                "torch.cuda operations.",
-                file=sys.stderr,
+                "torch.cuda operations."
             )
     except (ImportError, AttributeError):
-        pass
+        pass  # torch.cuda not available or no _initialized attr
 
     # Set LD_PRELOAD
     current_preload = os.environ.get("LD_PRELOAD", "")
@@ -260,20 +234,14 @@ def _setup_nvbit(verbose: bool):
             os.environ["LD_PRELOAD"] = nvbit_str
 
     _tier3_active = True
-
-    if verbose:
-        print(
-            f"[prlx] Tier 3: NVBit LD_PRELOAD configured ({nvbit_lib})",
-            file=sys.stderr,
+    logger.info("Tier 3: NVBit LD_PRELOAD configured (%s)", nvbit_lib)
+    if not current_preload:
+        logger.info(
+            "NOTE: LD_PRELOAD was set in this process. If the CUDA "
+            "driver was already loaded, you may need to re-launch the "
+            "program with:\n  LD_PRELOAD=%s python your_script.py",
+            nvbit_str,
         )
-        if not current_preload:
-            print(
-                "[prlx] NOTE: LD_PRELOAD was set in this process. If the CUDA "
-                "driver was already loaded, you may need to re-launch the "
-                "program with:\n"
-                f"  LD_PRELOAD={nvbit_str} python your_script.py",
-                file=sys.stderr,
-            )
 
 
 class PrlxTorchWrapper:
@@ -326,7 +294,7 @@ class PrlxTorchWrapper:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         except (ImportError, RuntimeError):
-            pass
+            pass  # no GPU or torch.cuda unavailable
 
         return self
 
@@ -378,7 +346,7 @@ def uninstall():
             import torch.utils.cpp_extension as cpp_ext
             cpp_ext.load_inline = _original_load_inline
         except ImportError:
-            pass
+            pass  # torch not available
         _original_load_inline = None
         _tier2_active = False
 

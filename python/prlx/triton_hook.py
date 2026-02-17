@@ -15,6 +15,10 @@ import functools
 from pathlib import Path
 from typing import Optional
 
+from ._log import get_logger
+
+logger = get_logger(__name__)
+
 from ._find_lib import (
     find_pass_plugin,
     find_runtime_bitcode,
@@ -58,18 +62,16 @@ def install(pass_plugin: Optional[str] = None, verbose: bool = True):
             + "\n".join(f"  - {m}" for m in missing)
         )
 
-    if verbose:
-        print(f"[prlx] Pass plugin: {_pass_plugin}", file=sys.stderr)
-        print(f"[prlx] Runtime BC:  {_runtime_bc}", file=sys.stderr)
-        print(f"[prlx] opt:         {_opt_bin}", file=sys.stderr)
-        print(f"[prlx] llvm-link:   {_llvm_link_bin}", file=sys.stderr)
+    logger.info("Pass plugin: %s", _pass_plugin)
+    logger.info("Runtime BC:  %s", _runtime_bc)
+    logger.info("opt:         %s", _opt_bin)
+    logger.info("llvm-link:   %s", _llvm_link_bin)
 
     _hook_triton_stages(verbose)
     _wrap_triton_launch(verbose)
 
     _installed = True
-    if verbose:
-        print("[prlx] Triton integration installed", file=sys.stderr)
+    logger.info("Triton integration installed")
 
 
 def _get_subprocess_timeout() -> int:
@@ -131,7 +133,7 @@ def _instrument_llvm_ir(llvm_ir: str) -> str:
 
         for line in result.stderr.splitlines():
             if "[prlx]" in line:
-                print(line.strip(), file=sys.stderr)
+                logger.info("%s", line.strip())
 
         return instrumented
 
@@ -155,8 +157,7 @@ def _hook_triton_stages(verbose: bool):
 
     knobs.runtime.add_stages_inspection_hook = prlx_stages_hook
 
-    if verbose:
-        print("[prlx] Hooked Triton stages API", file=sys.stderr)
+    logger.info("Hooked Triton stages API")
 
 
 def _wrap_triton_launch(verbose: bool):
@@ -170,8 +171,7 @@ def _wrap_triton_launch(verbose: bool):
 
     rt_lib = find_runtime_library()
     if rt_lib is None:
-        if verbose:
-            print("[prlx] Runtime library not found, manual buffer management required", file=sys.stderr)
+        logger.info("Runtime library not found, manual buffer management required")
         return
 
     from .runtime import PrlxRuntime
@@ -192,8 +192,7 @@ def _wrap_triton_launch(verbose: bool):
 
     knobs.runtime.launch_enter_hook = _prlx_launch_enter
 
-    if verbose:
-        print("[prlx] launch_enter_hook installed", file=sys.stderr)
+    logger.info("launch_enter_hook installed")
 
     _original_launch = JITFunction.run
 
@@ -222,10 +221,10 @@ def _wrap_triton_launch(verbose: bool):
                         f"{getattr(self, '__name__', 'triton_kernel')}: {exc}"
                     ) from exc
                 num_warps = int(kwargs.get("num_warps", 4))
-                print(
-                    "[prlx] Warning: failed to resolve Triton grid lambda; "
-                    f"using fallback grid=({num_warps}, 1, 1): {exc}",
-                    file=sys.stderr,
+                logger.warning(
+                    "Failed to resolve Triton grid lambda; "
+                    "using fallback grid=(%d, 1, 1): %s",
+                    num_warps, exc,
                 )
                 grid_dim = (num_warps, 1, 1)
         elif isinstance(grid, (tuple, list)):
@@ -245,8 +244,7 @@ def _wrap_triton_launch(verbose: bool):
         return result
 
     JITFunction.run = instrumented_run
-    if verbose:
-        print("[prlx] Kernel launch wrapper installed", file=sys.stderr)
+    logger.info("Kernel launch wrapper installed")
 
 
 def uninstall():

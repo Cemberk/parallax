@@ -173,6 +173,86 @@ class TraceData:
                 result.append(i)
         return result
 
+    def filter_events(
+        self,
+        event_type: Optional[int] = None,
+        site_id: Optional[int] = None,
+        warp_idx: Optional[int] = None,
+    ) -> List[TraceEvent]:
+        """Return events matching all specified criteria."""
+        results: List[TraceEvent] = []
+        for w in self._warps:
+            if warp_idx is not None and w.warp_idx != warp_idx:
+                continue
+            for ev in w.events:
+                if event_type is not None and ev.event_type != event_type:
+                    continue
+                if site_id is not None and ev.site_id != site_id:
+                    continue
+                results.append(ev)
+        return results
+
+    def events_at_site(self, site_id: int) -> List[tuple]:
+        """Return ``(warp_idx, event)`` pairs for every event at *site_id*."""
+        out: List[tuple] = []
+        for w in self._warps:
+            for ev in w.events:
+                if ev.site_id == site_id:
+                    out.append((w.warp_idx, ev))
+        return out
+
+    def branches(self) -> List[TraceEvent]:
+        """Shorthand for ``filter_events(event_type=0)``."""
+        return self.filter_events(event_type=0)
+
+    def atomics(self) -> List[TraceEvent]:
+        """Shorthand for ``filter_events(event_type=2)``."""
+        return self.filter_events(event_type=2)
+
+    def summary(self) -> dict:
+        """Return a summary dict: kernel name, dims, event counts, overflows."""
+        h = self._header
+        counts: dict = {}
+        for w in self._warps:
+            for ev in w.events:
+                name = EVENT_NAMES.get(ev.event_type, f"Unknown({ev.event_type})")
+                counts[name] = counts.get(name, 0) + 1
+        return {
+            "kernel_name": h.kernel_name,
+            "grid_dim": h.grid_dim,
+            "block_dim": h.block_dim,
+            "num_warps": self.num_warps,
+            "total_events": self.total_events,
+            "total_overflows": self.total_overflows,
+            "events_by_type": counts,
+        }
+
+    def compare_warps(self, warp_a_idx: int, warp_b_idx: int) -> List[dict]:
+        """Compare events of two warps, returning per-index field diffs."""
+        wa = self.warp(warp_a_idx)
+        wb = self.warp(warp_b_idx)
+        diffs: List[dict] = []
+        for i in range(max(len(wa.events), len(wb.events))):
+            ea = wa.events[i] if i < len(wa.events) else None
+            eb = wb.events[i] if i < len(wb.events) else None
+            if ea is None or eb is None:
+                diffs.append({"index": i, "a": ea, "b": eb, "fields": ["missing"]})
+                continue
+            changed = []
+            if ea.site_id != eb.site_id:
+                changed.append("site_id")
+            if ea.event_type != eb.event_type:
+                changed.append("event_type")
+            if ea.branch_dir != eb.branch_dir:
+                changed.append("branch_dir")
+            if ea.active_mask != eb.active_mask:
+                changed.append("active_mask")
+            if ea.value_a != eb.value_a:
+                changed.append("value_a")
+            if changed:
+                diffs.append({"index": i, "a": ea, "b": eb, "fields": changed})
+        return diffs
+
 
 def read_trace(path: str) -> TraceData:
     """Read a .prlx trace file."""

@@ -11,7 +11,7 @@ except Exception as _e:
     __version__ = "0.0.0.dev0"
     _logger.debug("Could not read prlx version from metadata: %s", _e)
 
-from .trace_reader import read_trace, TraceData
+from .trace_reader import read_trace, TraceData, TraceEvent, TraceHeader, WarpData
 from .training_monitor import PrlxTrainingMonitor
 from ._find_lib import find_differ_binary
 
@@ -77,3 +77,21 @@ def pytorch_trace(name: str, **kwargs):
     """
     from .pytorch_hook import PrlxTorchWrapper
     return PrlxTorchWrapper(name, **kwargs)
+
+
+def plot_warp_timeline(trace, **kwargs):
+    """Scatter plot of events by warp (lazy import of matplotlib)."""
+    from .viz import plot_warp_timeline as _impl
+    return _impl(trace, **kwargs)
+
+
+def plot_divergence_heatmap(trace_a, trace_b, **kwargs):
+    """Heatmap of per-warp divergence counts (lazy import of matplotlib)."""
+    from .viz import plot_divergence_heatmap as _impl
+    return _impl(trace_a, trace_b, **kwargs)
+
+
+def display_trace_summary(trace):
+    """HTML table summarising a trace (works in Jupyter)."""
+    from .viz import display_trace_summary as _impl
+    return _impl(trace)

@@ -47,6 +47,9 @@ private:
                            llvm::IRBuilder<>& Builder, llvm::Module& M);
     void embedSiteTable(llvm::Module& M, const SiteTable& siteTable);
 
+    // Helper: convert any Value to i32, handling int/float/double with truncation
+    llvm::Value* valueToI32(llvm::IRBuilder<>& Builder, llvm::Value* Val);
+
     // Runtime function declarations (cached)
     llvm::Function* record_branch_fn_ = nullptr;
     llvm::Function* record_shmem_store_fn_ = nullptr;

@@ -167,7 +167,7 @@ extern "C" __device__ void __prlx_record_atomic(
     evt.site_id = site_id;
     evt.event_type = EVENT_ATOMIC;
     evt.branch_dir = 0;
-    evt._reserved = 0;
+    evt._reserved = (uint16_t)(result & 0xFFFF);
     evt.active_mask = __activemask();
     evt.value_a = operand;
 

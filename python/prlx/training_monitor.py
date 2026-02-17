@@ -10,13 +10,16 @@ import json
 import math
 import os
 import shutil
-import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Deque, Dict, List, Optional
+
+from ._log import get_logger
+
+logger = get_logger(__name__)
 
 
 class AnomalyType(Enum):
@@ -98,10 +101,9 @@ class StepContext:
             except Exception as exc:
                 if os.environ.get("PRLX_STRICT_CAPTURE", "0") == "1":
                     raise
-                print(
-                    "[prlx] Warning: failed to initialize step capture "
-                    f"for step {self._step}: {exc}",
-                    file=sys.stderr,
+                logger.warning(
+                    "Failed to initialize step capture for step %d: %s",
+                    self._step, exc,
                 )
                 self._wrapper = None
 

@@ -297,9 +297,32 @@ void PrlxPass::instrumentSnapshot(CmpInst* CI, uint32_t site_id,
         ConstantInt::get(Type::getInt32Ty(Ctx), predicate)
     });
 
-    // CRITICAL: ALL active lanes must execute __prlx_record_snapshot
-    // because it uses __shfl_sync() internally to gather per-lane values
-    SnapCall->addFnAttr(Attribute::Convergent);
+    SnapCall->addFnAttr(Attribute::Convergent);  // uses __shfl_sync
+}
+
+Value* PrlxPass::valueToI32(IRBuilder<>& Builder, Value* Val) {
+    LLVMContext& Ctx = Builder.getContext();
+    Type* Ty = Val->getType();
+
+    if (Ty->isIntegerTy()) {
+        unsigned BitW = Ty->getIntegerBitWidth();
+        if (BitW <= 32) {
+            return Builder.CreateZExtOrTrunc(Val, Type::getInt32Ty(Ctx));
+        }
+        // >32bit: take high 32 bits
+        Value* Hi = Builder.CreateLShr(Val, ConstantInt::get(Ty, 32));
+        return Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
+    }
+    if (Ty->isFloatTy()) {
+        return Builder.CreateBitCast(Val, Type::getInt32Ty(Ctx));
+    }
+    if (Ty->isDoubleTy()) {
+        Value* AsI64 = Builder.CreateBitCast(Val, Type::getInt64Ty(Ctx));
+        Value* Hi = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
+        return Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
+    }
+    // unsupported type
+    return ConstantInt::get(Type::getInt32Ty(Ctx), 0);
 }
 
 void PrlxPass::instrumentSharedMemStore(StoreInst* SI, SiteTable& siteTable, Module& M) {
@@ -313,19 +336,7 @@ void PrlxPass::instrumentSharedMemStore(StoreInst* SI, SiteTable& siteTable, Mod
     Builder.SetInsertPoint(SI);
 
     Value* AddrInt = Builder.CreatePtrToInt(Ptr, Type::getInt32Ty(Ctx));
-    Value* ValI32;
-    if (StoredVal->getType()->isIntegerTy()) {
-        ValI32 = Builder.CreateZExtOrTrunc(StoredVal, Type::getInt32Ty(Ctx));
-    } else if (StoredVal->getType()->isFloatTy()) {
-        ValI32 = Builder.CreateBitCast(StoredVal, Type::getInt32Ty(Ctx));
-    } else if (StoredVal->getType()->isDoubleTy()) {
-        Value* AsI64 = Builder.CreateBitCast(StoredVal, Type::getInt64Ty(Ctx));
-        Value* Hi = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
-        ValI32 = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
-    } else {
-        // Unsupported type - skip
-        return;
-    }
+    Value* ValI32 = valueToI32(Builder, StoredVal);
 
     CallInst* CI = Builder.CreateCall(record_shmem_store_fn_, {
         ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
@@ -333,8 +344,7 @@ void PrlxPass::instrumentSharedMemStore(StoreInst* SI, SiteTable& siteTable, Mod
         ValI32
     });
 
-    // CRITICAL: Mark as convergent (uses __activemask())
-    CI->addFnAttr(Attribute::Convergent);
+    CI->addFnAttr(Attribute::Convergent);  // uses __activemask
 }
 
 void PrlxPass::instrumentGlobalMemStore(StoreInst* SI, SiteTable& siteTable, Module& M) {
@@ -348,18 +358,7 @@ void PrlxPass::instrumentGlobalMemStore(StoreInst* SI, SiteTable& siteTable, Mod
     Builder.SetInsertPoint(SI);
 
     Value* AddrInt = Builder.CreatePtrToInt(Ptr, Type::getInt32Ty(Ctx));
-    Value* ValI32;
-    if (StoredVal->getType()->isIntegerTy()) {
-        ValI32 = Builder.CreateZExtOrTrunc(StoredVal, Type::getInt32Ty(Ctx));
-    } else if (StoredVal->getType()->isFloatTy()) {
-        ValI32 = Builder.CreateBitCast(StoredVal, Type::getInt32Ty(Ctx));
-    } else if (StoredVal->getType()->isDoubleTy()) {
-        Value* AsI64 = Builder.CreateBitCast(StoredVal, Type::getInt64Ty(Ctx));
-        Value* Hi = Builder.CreateLShr(AsI64, ConstantInt::get(Type::getInt64Ty(Ctx), 32));
-        ValI32 = Builder.CreateTrunc(Hi, Type::getInt32Ty(Ctx));
-    } else {
-        return;
-    }
+    Value* ValI32 = valueToI32(Builder, StoredVal);
 
     CallInst* CI = Builder.CreateCall(record_global_store_fn_, {
         ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
@@ -375,35 +374,56 @@ void PrlxPass::instrumentAtomic(AtomicRMWInst* AI, SiteTable& siteTable, Module&
     IRBuilder<> Builder(Ctx);
 
     uint32_t site_id = siteTable.getSiteId(AI, EVENT_ATOMIC);
-    Builder.SetInsertPoint(AI);
 
     Value* Ptr = AI->getPointerOperand();
     Value* Val = AI->getValOperand();
 
-    Value* AddrInt = Builder.CreatePtrToInt(Ptr, Type::getInt32Ty(Ctx));
-    Value* ValI32;
-    if (Val->getType()->isIntegerTy()) {
-        ValI32 = Builder.CreateZExtOrTrunc(Val, Type::getInt32Ty(Ctx));
-    } else {
-        return;  // Skip non-integer atomics for now
-    }
+    // Insert AFTER the atomic so we can read the old-value result (AI itself).
+    Instruction* InsertPt = AI->getNextNode();
+    if (!InsertPt) return;
+    Builder.SetInsertPoint(InsertPt);
 
-    // Result recording requires splitting the block; for now just record the operand
+    Value* AddrInt = Builder.CreatePtrToInt(Ptr, Type::getInt32Ty(Ctx));
+    Value* ValI32 = valueToI32(Builder, Val);
+    Value* ResultI32 = valueToI32(Builder, AI);  // AI is the old value result
+
     CallInst* CI = Builder.CreateCall(record_atomic_fn_, {
         ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
         AddrInt,
         ValI32,
-        ConstantInt::get(Type::getInt32Ty(Ctx), 0)  // Result placeholder
+        ResultI32
     });
 
-    // CRITICAL: Mark as convergent (uses __activemask())
     CI->addFnAttr(Attribute::Convergent);
 }
 
-void PrlxPass::instrumentCmpXchg(AtomicCmpXchgInst* CI, SiteTable& siteTable, Module& M) {
-    // NOT YET IMPLEMENTED: CmpXchg (atomic compare-and-swap) instrumentation
-    // requires splitting the basic block to capture the result after the
-    // atomic completes. AtomicCmpXchg instructions will not appear in traces.
+void PrlxPass::instrumentCmpXchg(AtomicCmpXchgInst* CXI, SiteTable& siteTable, Module& M) {
+    LLVMContext& Ctx = M.getContext();
+    IRBuilder<> Builder(Ctx);
+
+    uint32_t site_id = siteTable.getSiteId(CXI, EVENT_ATOMIC);
+
+    Value* Ptr = CXI->getPointerOperand();
+    Value* Expected = CXI->getCompareOperand();
+
+    // Insert AFTER the cmpxchg to read the result aggregate {T, i1}.
+    Instruction* InsertPt = CXI->getNextNode();
+    if (!InsertPt) return;
+    Builder.SetInsertPoint(InsertPt);
+
+    Value* AddrInt = Builder.CreatePtrToInt(Ptr, Type::getInt32Ty(Ctx));
+    Value* ExpI32 = valueToI32(Builder, Expected);
+    Value* OldVal = Builder.CreateExtractValue(CXI, 0);  // extract old value from {T, i1}
+    Value* OldI32 = valueToI32(Builder, OldVal);
+
+    CallInst* RecordCall = Builder.CreateCall(record_atomic_fn_, {
+        ConstantInt::get(Type::getInt32Ty(Ctx), site_id),
+        AddrInt,
+        ExpI32,
+        OldI32
+    });
+
+    RecordCall->addFnAttr(Attribute::Convergent);
 }
 
 void PrlxPass::instrumentValueCaptures(BranchInst* BI, SiteTable& siteTable, Module& M) {
